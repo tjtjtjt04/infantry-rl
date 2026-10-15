@@ -1,3 +1,4 @@
 {
-    "cmake.sourceDirectory": "D:/Robomaster/RL/infantry-rl"
+    "cmake.sourceDirectory": "D:/Robomaster/RL/infantry-rl",
+    "emberprobe.openocdPath": "c:\\Users\\CMD\\AppData\\Roaming\\Code\\User\\globalStorage\\bakesheep.emberprobe\\emberprobe\\openocd\\bin\\openocd.exe"
 }
