@@ -1,2 +1,10 @@
 __pycache__/
 *.pyc
+logs/
+*.log
+*.diff
+*.usd
+*.usda
+*.usdc
+*.STL
+*.stl

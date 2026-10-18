@@ -1,0 +1,900 @@
+# 训练与查看结果 —— 操作手册
+
+本文件里的命令**全部在本机实测过**，可直接复制粘贴到 **cmd** 运行。
+
+---
+
+## 0. 一句话速查
+
+> **现在有两个任务**，别混用：
+>
+> | 任务 | 用途 | 训练命令的 `--task` |
+> |---|---|---|
+> | **Balance** | 站在原地保持平衡 + 保持航向/位置 | `Infantry-RL-Balance-v0` |
+> | **Locomotion** | 前进后退 + 转弯 + 原地旋转（按速度指令） | `Infantry-RL-Locomotion-v0` |
+>
+> 两者 checkpoint 的观测维度不同（Balance 33 维 / Locomotion 31 维），
+> **不能互相加载**。
+
+三条命令**分开执行**（不要用 `&&` 串起来 —— `&&` 不等待前一条结束就启动下一条，会撞车）。
+
+```cmd
+:: ① 开始训练（前台跑，日志同时进文件）
+cd /d D:\Robomaster\RL
+taskkill /F /IM python.exe
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\train.py --task Infantry-RL-Balance-v0 --headless --num_envs 4096 --max_iterations 5000 --no_code_state 
+
+:: ③ 看效果（必须先停训练！）
+taskkill /F /IM python.exe
+cd /d D:\Robomaster\RL
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\play.py --task Infantry-RL-Balance-Play-v0 --num_envs 1 --load_run .* --checkpoint model_xxx.pt
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\play.py --task Infantry-RL-Locomotion-Play-v0 --num_envs 1 --load_run .* --checkpoint model_7998.pt 
+
+```
+
+**训练运动（Locomotion）任务** —— 只要把 `--task` 换掉：
+
+```cmd
+cd /d D:\Robomaster\RL
+taskkill /F /IM python.exe
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\train.py --task Infantry-RL-Locomotion-v0 --headless --num_envs 4096 --max_iterations 8000 --no_code_state
+```
+
+
+**想让训练完全脱离 cmd 窗口**（关掉窗口也不停），用这个：
+
+```cmd
+cd /d D:\Robomaster\RL
+taskkill /F /IM python.exe
+start "train4096" /B cmd /c "D:\miniconda\envs\RM\python.exe isaac_ws\scripts\train.py --task Infantry-RL-Balance-v0 --headless --num_envs 4096 --max_iterations 5000 --no_code_state > isaac_ws\scripts\_train4096.log 2>&1"
+```
+
+---
+
+## ⚠️ 三条必须知道的规则
+
+### 1. 训练和回放**不能同时跑**
+
+两个都要 Kit + 同一块 GPU（8 GB 显存，训练已占 4.4 GB）。
+**回放前必须先 `taskkill /F /IM python.exe` 杀掉训练**，否则会卡死或显存不足。
+
+### 2. `--num_envs` 只能用 **1** 或 **≥ 1024**
+
+| 环境数 | 结果 |
+|---|---|
+| 1 | ✅ 可用（慢，训练无意义） |
+| 2 ~ 256 | ❌ **卡死在 `gym.make()`**，无限阻塞 |
+| **4096** | ✅ **实测可用**，2.7 s/迭代 |
+
+原因见 [`VERIFIED_RESULTS.md`](VERIFIED_RESULTS.md) 第 3 节。
+**要训练就用 4096，不要用中间值。**
+
+### 3. 训练必须加 `--no_code_state`
+
+否则会在第一次迭代前崩溃：
+
+```
+UnicodeEncodeError: 'utf-8' codec can't encode characters: surrogates not allowed
+```
+
+原因：本仓库 git 索引里有个已删除的 1 MB GBK 日志 `infantry-rl/export.log`，
+rsl_rl 存 git diff 时解码失败。`--no_code_state` 只跳过这个存档，不影响 TensorBoard / checkpoint。
+
+---
+
+## 1. 开始训练
+
+### 1.1 正式训练（推荐：4096 环境 × 5000 迭代）
+
+```cmd
+cd /d D:\Robomaster\RL
+taskkill /F /IM python.exe
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\train.py --task Infantry-RL-Balance-v0 --headless --num_envs 4096 --max_iterations 5000 --no_code_state > isaac_ws\scripts\_train4096.log 2>&1
+```
+
+- 实测速度：**约 2.7 秒/迭代** → 5000 迭代约 **3.5 小时**
+- 加了 `> ... 2>&1` 把日志写进文件，方便看进度（不加就直接刷屏）
+
+**让它在后台跑、不占着 cmd 窗口**，用这个：
+
+```cmd
+cd /d D:\Robomaster\RL
+taskkill /F /IM python.exe
+start "train4096" /B cmd /c "D:\miniconda\envs\RM\python.exe isaac_ws\scripts\train.py --task Infantry-RL-Balance-v0 --headless --num_envs 4096 --max_iterations 5000 --no_code_state > isaac_ws\scripts\_train4096.log 2>&1"
+```
+
+### 1.2 快速验证（约 3 分钟，只为确认链路通）
+
+```cmd
+cd /d D:\Robomaster\RL
+taskkill /F /IM python.exe
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\train.py --task Infantry-RL-Balance-v0 --headless --num_envs 4096 --max_iterations 100 --no_code_state --run_name quick
+```
+
+### 1.3 断点续训
+
+```cmd
+cd /d D:\Robomaster\RL
+taskkill /F /IM python.exe
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\train.py --task Infantry-RL-Balance-v0 --headless --num_envs 4096 --max_iterations 5000 --no_code_state --resume --load_run 2026-10-17_00-56-16 --checkpoint model_500.pt
+```
+
+`--load_run` 填 `logs\rsl_rl\infantry_rl_balance\` 下的时间戳目录名。
+
+### 1.4 常用参数
+
+| 参数 | 说明 |
+|---|---|
+| `--task` | 训练用 `Infantry-RL-Balance-v0`；回放用 `Infantry-RL-Balance-Play-v0` |
+| `--num_envs` | **只能 1 或 4096**（见上文规则 2） |
+| `--max_iterations` | 迭代数，5000 约 3.5 小时 |
+| `--no_code_state` | **必加**（见上文规则 3） |
+| `--run_name` | 给本次 run 加后缀，方便区分 |
+| `--seed` | 随机种子，默认 42 |
+| `--headless` | 不开窗口（训练必加） |
+
+---
+
+## 2. 查看训练进度
+
+### 2.1 看实时日志（最常用）
+
+```cmd
+powershell -NoProfile -Command "Get-Content D:\Robomaster\RL\isaac_ws\scripts\_train4096.log -Tail 40 | Select-String 'Learning iteration|Mean reward|Mean episode length|ETA|Mean value loss'"
+```
+
+**看三个数**：
+
+| 指标 | 应该怎样 | 说明 |
+|---|---|---|
+| `Mean reward` | **持续上升** | 现在约 -6.4，越接近 0 越好 |
+| `Mean episode length` | **保持 500** | 掉下来 = 开始大面积摔倒 |
+| `ETA` | 会波动 | 剩余时间估算 |
+
+### 2.2 TensorBoard 曲线（更直观）
+
+```cmd
+cd /d D:\Robomaster\RL
+D:\miniconda\envs\RM\python.exe -m tensorboard.main --logdir logs\rsl_rl\infantry_rl_balance
+```
+
+浏览器打开它打印的地址（通常是 `http://localhost:6006`）。
+可以看 `Episode_Reward/*` 每一项和 `Episode_Termination/*` 的曲线。
+
+### 2.3 看已存了哪些 checkpoint
+
+```cmd
+dir /b /o-d "D:\Robomaster\RL\logs\rsl_rl\infantry_rl_balance\2026-10-17_00-56-16\model_*.pt"
+```
+
+把 `2026-10-17_00-56-16` 换成你自己 run 的目录名。
+不知道目录名就先列目录：
+
+```cmd
+dir /ad /o-d /b "D:\Robomaster\RL\logs\rsl_rl\infantry_rl_balance"
+```
+
+**每 50 迭代存一次**，文件名是 `model_<迭代数>.pt`（迭代数越大越新）。
+
+---
+
+## 3. 查看效果（回放）
+
+### ⚠️ 回放前务必先停训练
+
+```cmd
+taskkill /F /IM python.exe
+```
+
+### 3.1 开窗口实时看（推荐）
+
+```cmd
+cd /d D:\Robomaster\RL
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\play.py --task Infantry-RL-Balance-Play-v0 --num_envs 1 --checkpoint 2026-10-17_00-56-16\model_500.pt --real-time --steps 2000
+```
+
+- **不要加 `--headless`**，否则没有窗口
+- `--steps 2000` = 40 秒（控制频率 50 Hz），想多看就加大
+- `--real-time` 按真实时间播放；**去掉会全速跑完 2000 步然后退出**（几秒就没了）
+- 窗口里：鼠标左键旋转、右键平移、滚轮缩放
+
+### 3.2 `--checkpoint` 三种写法都支持
+
+```cmd
+:: ① 相对 logs\rsl_rl\infantry_rl_balance\ 的路径（推荐）
+--checkpoint 2026-10-17_00-56-16\model_500.pt
+
+:: ② 绝对路径
+--checkpoint D:\Robomaster\RL\logs\rsl_rl\infantry_rl_balance\2026-10-17_00-56-16\model_500.pt
+
+:: ③ 纯文件名 + --load_run 指定目录
+--load_run 2026-10-17_00-56-16 --checkpoint model_500.pt
+```
+
+### 🚫 不要用 `--use_last_checkpoint`
+
+Isaac Lab 的排序是按**文件名字符串补零**（`parse_cfg.py`）：
+
+```python
+model_checkpoints.sort(key=lambda m: f"{m:0>15}")
+checkpoint_file = model_checkpoints[-1]
+```
+
+结果 **`model_0.pt` 会排在 `model_500.pt` 后面**，你会拿到**最初始的权重**。
+**请显式写 `--checkpoint`。**
+
+### 3.3 无头模式录制视频
+
+```cmd
+cd /d D:\Robomaster\RL
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\play.py --task Infantry-RL-Balance-Play-v0 --num_envs 1 --checkpoint 2026-10-17_00-56-16\model_500.pt --headless --video --steps 500
+```
+
+视频输出到 `logs\rsl_rl\infantry_rl_balance\videos\play\`。
+
+### 3.4 回放输出的指标怎么读
+
+```cmd
+[play] step    0  base_z=0.1912  closure_max=4.351e-04 m
+[play] step  100  base_z=0.1578  closure_max=5.602e-04 m
+[play] steps=500  base_z mean=0.1544 m  max closure residual=6.793e-04 m
+```
+
+| 指标 | 含义 | 合格标准 |
+|---|---|---|
+| `base_z` | 机体离地高度 | **站立约 0.19 m**；掉到 0.14~0.15 m 就是倒了 |
+| `closure_max` | 五连杆闭环残差 | **< 1e-3 m** 说明闭环控制正常（这个一般都没问题） |
+
+**判断有没有学会站**：看 `base_z` 能不能**一直保持在 0.19 m 附近**。
+开局是 0.19（因为初始姿势就是站立的），后面掉下去就是摔了。
+
+---
+
+## 4. 离线批量评估（不开窗口，快）
+
+想知道一个 checkpoint 到底站不站得住，用 `--headless` 跑长一点，看 `base_z` 的走势：
+
+```cmd
+cd /d D:\Robomaster\RL
+taskkill /F /IM python.exe
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\play.py --task Infantry-RL-Balance-Play-v0 --num_envs 1 --checkpoint 2026-10-17_00-56-16\model_500.pt --headless --steps 2000 > isaac_ws\scripts\_eval.log 2>&1
+powershell -NoProfile -Command "Get-Content D:\Robomaster\RL\isaac_ws\scripts\_eval.log | Select-String '\[play\]'"
+```
+
+`base_z` 从 0.19 掉下去的时间点越晚越好；300 步后才掉就说明在学了。
+
+---
+
+## 5. 任务与环境
+
+| 任务名 | 用途 |
+|---|---|
+| `Infantry-RL-Balance-v0` | 训练 |
+| `Infantry-RL-Balance-Play-v0` | 回放（观测不加噪声） |
+
+**环境规格（实测）**：动作 6 维（4 髋 + 2 轮）· 观测 29 维 · 控制频率 50 Hz ·
+阶段长度 20 s（1000 个控制步）· 10 个自由度。
+
+9 项奖励：`alive +0.5`、`flat_orientation -2`、`base_height -10`、
+`action_rate -0.01`、`joint_torques -1e-4`、`joint_acc -1e-7`、
+`wheel_spin -1e-4`、`closure_residual -1000`、`fall_penalty -50`。
+
+---
+
+## 6. 出问题怎么办
+
+| 现象 | 原因 / 处理 |
+|---|---|
+| 卡在 `Starting the simulation` 不动 | `--num_envs` 用了 2~256。改成 1 或 4096 |
+| `UnicodeEncodeError ... surrogates` | 忘了加 `--no_code_state` |
+| `argparse ... conflicting option string` | 脚本已修；若复现请更新 `play.py` |
+| `No checkpoints ... match` | `--checkpoint` 路径写错了，用 2.3 节命令列一下实际文件 |
+| 回放卡死 / 显存不足 | 训练还在跑，先 `taskkill /F /IM python.exe` |
+| 训练很慢或 CPU 跑满 | 残留 Kit 进程占着锁，`taskkill /F /IM python.exe` 后重来 |
+| 脚本报 `No module named isaac_ws_infantry` | 必须在 `D:\Robomaster\RL` 目录下运行（`cd /d D:\Robomaster\RL`） |
+
+**任何卡死都先做这一步**：
+
+```cmd
+taskkill /F /IM python.exe
+```
+
+---
+
+## 7. 实测记录（供对照）
+
+| 项目 | 实测值 |
+|---|---|
+| 4096 环境启动时间 | 约 2 s（**不卡**） |
+| 迭代速度 | 2.65 ~ 2.7 s/迭代 |
+| 5000 迭代预计 | 约 3.5 小时 |
+| 100 迭代（1 环境）结果 | **摔倒**，`base_z` 从 0.19 掉到 0.145 后不动 |
+| 100 迭代的闭环残差 | 6.8e-4 m（**闭环控制始终正常**） |
+| 4096 训练第 100 迭代时 | `Mean reward -6.4`，`Mean episode length 500.00`（满分，还没开始摔） |
+| 闭环控制验证（`smoke_test.py`） | 残差 **0.750 mm**，200 步零跌倒 |
+| 运动学验证（`test_leg_model.py`） | 与精确 FK 误差 **1.8e-16 m** |
+
+> **提醒**：100 迭代 × 1 环境 = 2400 步经验，离学会平衡差 4 个数量级，摔倒完全正常。
+> 参考仓库那种效果是**几万次迭代 × 几千环境**训出来的。请用 4096 × ≥5000。
+
+### 怎么判断"学会了没有"
+
+| `Mean episode length` | `base_z`（回放） | 结论 |
+|---|---|---|
+| 500.00 | 稳定在 0.19 m | ✅ 学会了 |
+| 500.00 | 慢慢往下掉 | 🟡 在学，继续训 |
+| 明显 < 500 | 掉到 0.14 ~ 0.15 m 就不动 | ❌ 还在摔，需要更多迭代 |
+
+### 训练到什么程度才值得看
+
+| 迭代数 | 约需时间 | 预期 |
+|---|---|---|
+| < 500 | < 25 min | 基本还在摔，别急 |
+| 1000 ~ 2000 | 45 ~ 90 min | 可能开始"撑一下" |
+| ≥ 3000 | ≥ 2.2 h | 有望站稳，这时候回放才有意义 |
+
+---
+
+## 7.5 让机器人保持航向（不原地打转）
+
+### 为什么会打转
+
+第一版奖励里**完全没有航向项**：
+
+- `flat_orientation_l2` 只看投影重力的 **x/y 分量**，也就是只约束 roll/pitch；
+  **纯 yaw 旋转完全不影响这两个分量**，所以在它眼里"打转"和"站着不动"一样好；
+- 观测里也没有绝对航向（`base_ang_vel` 只有 yaw *角速度*，没有角度）；
+- `wheel_spin` 权重只有 `-1e-4`，相对 `alive=+0.5` 可以忽略。
+
+所以 PPO 很自然地找到了"站着慢慢转"这个同样高分的解。已在实测中确认：
+两个轮轴在机体坐标系里**同向**（都是 `-Y`），所以不存在转向反接的硬件 bug。
+
+### 两种修法（二选一）
+
+#### 方法 A：重训，让策略自己保持航向（推荐，长期更好）
+
+已经改好了，直接按原来的命令重训即可：
+
+- 观测 **29 → 31 维**（新增 `heading` = 航向误差的 sin/cos）
+- 新增 3 个奖励项：
+
+| 奖励项 | 权重 | 作用 |
+|---|---|---|
+| `heading` | −0.5 | 二次惩罚航向误差（1 rad 误差约等于全部 alive 奖励） |
+| `yaw_rate` | −0.25 | 抑制快速旋转，防止绕目标来回摆 |
+| `heading_alive` | +0.25 | 误差 < 0.35 rad 时给固定奖励，近目标处梯度更明确 |
+
+```cmd
+cd /d D:\Robomaster\RL
+taskkill /F /IM python.exe
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\train.py --task Infantry-RL-Balance-v0 --headless --num_envs 4096 --max_iterations 5000 --no_code_state
+```
+
+> ⚠️ **必须从零重训**。观测维度变了（29→31），旧的 checkpoint 无法续训。
+
+#### 方法 B：不重训，外挂一个航向环（立刻可用）
+
+保留你已经训好的 29 维策略，在它的轮速指令外面套一个**航向 PD 控制器**。
+原理：把策略输出的**轮速均值**（负责前后平衡）保留，把**差速分量**（负责转向）换成控制器算的，
+所以策略学到的平衡能力不受影响。
+
+```cmd
+cd /d D:\Robomaster\RL
+taskkill /F /IM python.exe
+set INFANTRY_RL_HEADING_CONTROL=1
+set INFANTRY_RL_NO_HEADING_OBS=1
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\play.py --task Infantry-RL-Balance-Play-v0 --num_envs 1 --checkpoint 2026-10-17_10-45-58\model_2650.pt --debug_heading
+```
+
+| 环境变量 | 作用 |
+|---|---|
+| `INFANTRY_RL_HEADING_CONTROL=1` | 打开航向环 |
+| `INFANTRY_RL_NO_HEADING_OBS=1` | 去掉 heading 观测，恢复 29 维（旧权重才能加载） |
+
+调参（在 `balance_env_cfg.py` 的 `ActionsCfg.joints` 里）：
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `heading_kp` | 3.0 | 每 rad 航向误差对应的目标偏航角速度 |
+| `heading_kd` | 0.35 | 阻尼，抑制摆动 |
+| `heading_max_yaw_rate` | 3.0 | 目标偏航角速度上限 (rad/s) |
+| `heading_mode` | `"override"` | `override` 替换策略差速；`additive` 叠加在策略差速上 |
+| `target_heading` | 0.0 | 要保持的航向（rad），所有环境初始 yaw = 0 |
+
+### 实测效果（`model_2650` + 方法 B，400 步 = 8 秒）
+
+| 指标 | 修之前 | 修之后 |
+|---|---|---|
+| 净转角 | −179.4° | **−1.10°** |
+| 航向最大偏差 | 179.97° | **1.29°** |
+| 机体高度 | 0.2039 m | **0.2029 m**（平衡未受影响） |
+| 闭环残差 | 9.4e-4 m | **6.5e-4 m** |
+
+残余的 1.3° 是**约 1 Hz 的偏航小幅摆动**，不是持续漂移
+（用四元数逐步核对：航向稳定后 50 步内几乎不变）。
+
+### 判断有没有修好
+
+回放时看新增的输出：
+
+```
+[play] heading: net turn=-1.10 deg  max |deviation|=1.29 deg
+```
+
+- **`net turn` 接近 0** → 修好了（原来是 -180° 左右）
+- `net turn` 还是 ±180° → 航向环没生效，检查两个环境变量是否都设了
+
+---
+
+## 7.6 让机器人不乱跑（保持位置 / 控制位移）
+
+### 为什么修好航向后又开始往后跑
+
+和航向是**完全同一类漏洞**：第一版奖励里也没有任何约束前后位移的项。
+
+| 奖励项 | 为什么管不住前后跑 |
+|---|---|
+| `alive` / `flat_orientation` / `base_height` | 只管"站着"，不管"站在哪" |
+| `wheel_spin` (−1e-4) | 权重太小，可忽略 |
+| 观测 | 有 `base_lin_vel`（速度），但**没有位置** —— 策略不知道自己跑出去多远了 |
+
+实测：修好航向后，机器人 10 秒内**稳定后退 −0.245 m**（约 2.5 cm/s），
+高度始终 0.2008 m —— 也就是"平衡完美，但一直在漂"。
+
+### ⚠️ 为什么这次不能用外挂环（和航向不同）
+
+| | 航向 | 前后位移 |
+|---|---|---|
+| 对应轮速分量 | **差速**（两轮反向） | **共模**（两轮同向） |
+| 与平衡的关系 | **正交**，覆盖它不影响平衡 | **就是平衡的控制输入本身** |
+| 能否外挂环 | ✅ 可以（已验证，见 7.5） | ❌ **不行** |
+
+航向环能成功是因为差速只产生偏航力矩，不改变前进/后退力；
+而前后位移的共模轮速**正是**平衡控制器用来前后调整的那个量。
+从外面硬给共模轮速 = 像"不给 Segway 倾角、只给轮速"，必然推倒。
+
+**实测验证**（`model_350` + 位置环 kp=1.5/kd=0.6，500 步）：
+
+| | 无位置环 | 有位置环 |
+|---|---|---|
+| 后退位移 | −0.245 m | −0.445 m（更差） |
+| 机体高度 | 0.2008 m 稳定 | **掉到 0.16 m → 摔了** |
+
+所以位移**必须靠训练**，让策略学会"一边倾斜一边移动"这一整个技能。
+
+### 方法：重训（观测 31 → 33 维）
+
+已改好，直接重训：
+
+- 观测新增 **`position`（2 维）** = 位置误差在机体偏航系下的 (前, 左) 分量
+- 新增 3 个奖励项：
+
+| 奖励项 | 权重 | 作用 |
+|---|---|---|
+| `position` | −4.0 | 二次惩罚离目标点的距离（0.25 m 偏差约消耗一半 alive 奖励） |
+| `lin_vel` | −1.0 | 阻尼，防止在目标点附近来回振荡 |
+| `position_alive` | +0.2 | 距目标 < 0.2 m 时给固定奖励 |
+
+```cmd
+cd /d D:\Robomaster\RL
+taskkill /F /IM python.exe
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\train.py --task Infantry-RL-Balance-v0 --headless --num_envs 4096 --max_iterations 5000 --no_code_state
+```
+
+> ⚠️ **必须从零重训**。观测维度 31→33，之前那个 31 维的 checkpoint 无法续训。
+
+### 怎么"控制位移"（让机器人走到指定地方）
+
+改 `balance_env_cfg.py` 顶部的两个常量即可：
+
+```python
+TARGET_X = 0.0   # 目标位置（m），+X 是机器人正前方
+TARGET_Y = 0.0   # +Y 是左侧
+```
+
+比如 `TARGET_X = 0.5` 就是"往前 0.5 m 处停住"。
+这是**每个环境相对自己出生点**的目标，因为训练时 4096 个环境共用同一套配置。
+
+> 想做"变目标点"的训练（课程学习），需要把目标改成每个环境随机采样的
+> command，参考 `isaaclab.envs.mdp.commands` 里的 `UniformVelocityCommand` 之类。
+> 当前是固定目标，够用且更简单。
+
+### 回放时怎么看
+
+```cmd
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\play.py --task Infantry-RL-Balance-Play-v0 --num_envs 1 --checkpoint ^<你的run^>\model_xxxx.pt
+```
+
+看新增的两行：
+
+```
+[play] position: net displacement=(-0.245, +0.002) m  max |x|=0.245 m  mean |vx|=0.026 m/s
+```
+
+- **`net displacement` 的 x 接近 0** → 不再往后跑
+- 还是 −0.2 m 以上 → 训练轮数不够，或位置奖励权重需要加大
+
+---
+
+## 7.7 让机器人跑起来（前进后退 / 转弯 / 原地旋转）
+
+这是一个**新任务** `Infantry-RL-Locomotion-v0`，和前面的 Balance 任务并列，
+互不影响（Balance 的代码没动）。
+
+### 和 Balance 任务的区别
+
+| | Balance | Locomotion |
+|---|---|---|
+| 目标 | 站在原地，保持航向/位置 | 跟踪速度指令 `(vx, wz)` |
+| 目标的来源 | 固定常量（0） | CommandManager 产生 |
+| 观测维度 | 33 | **31** |
+| 能不能按指令动 | 不能 | **能**（前进/后退/转弯/原地旋转） |
+
+### 指令是怎么定义的
+
+机器人是**两轮差速**：前进后退靠两轮**共模**转速，转弯靠**差速**。
+所以指令是二维的：
+
+- `vx` = 前进速度（前后）
+- `wz` = 偏航角速度（左右转）
+
+**没有 `vy`**（侧向）—— 这个机器人没有侧向驱动轮，侧移指令永远跟不了，
+所以直接固定成 0，也不喂给策略（避免浪费一个观测维度）。
+
+用的是 Isaac Lab 的 `UniformVelocityCommand`，并开启 `heading_command=True`：
+
+```python
+wz_cmd = clip(0.9 * wrap(heading_target - heading), -1.5, 1.5)
+```
+
+也就是说**策略只跟踪角速度，航向目标由上层持有**。这样三个动作是同一套机制：
+
+| 操作 | 怎么实现 |
+|---|---|
+| 前进/后退 | 直接给 `vx` 指令 |
+| 转弯 | `vx ≠ 0` 且航向目标持续变化 |
+| 原地旋转 | `vx = 0` 且航向目标持续变化 |
+
+### 训练范围
+
+| 指令 | 训练范围 |
+|---|---|
+| `vx` | −0.5 ~ +0.5 m/s |
+| `wz` | −1.5 ~ +1.5 rad/s |
+| 航向目标 | −π ~ +π |
+| 指令保持时长 | 5 ~ 10 秒（每集 20 秒，能看到 2~4 个指令） |
+
+另外 10% 的环境会被指令为"原地站住"，用来学刹车。
+
+### 怎么训练
+
+```cmd
+cd /d D:\Robomaster\RL
+taskkill /F /IM python.exe
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\train.py --task Infantry-RL-Locomotion-v0 --headless --num_envs 4096 --max_iterations 8000 --no_code_state
+```
+
+> 运动比站立难得多，**8000 轮**才算比较稳（约 6 小时）。
+> 前 500 轮可能看着像"乱蹬腿"，这是正常的 —— 先学会不摔，再学会走。
+
+### 崩溃续训（这个任务训练时间长，很可能用得上）
+
+之前的 GPU 崩溃大约在 200 轮 / 5 分钟左右发生。现在支持**自动找最新 checkpoint 续训**：
+
+```cmd
+cd /d D:\Robomaster\RL
+taskkill /F /IM python.exe
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\train.py --task Infantry-RL-Locomotion-v0 --headless --num_envs 4096 --max_iterations 8000 --no_code_state --resume --resume_latest
+```
+
+`--resume_latest` 会按**数字大小**挑最新的 `model_N.pt`。
+（内置的 `--resume` 是按**字符串**排序的，会把 `model_0.pt` 当成最新的，
+所以一定要加 `--resume_latest`。）
+
+### 训练轮次不够，怎么接着练（重要）
+
+#### 规则：`--max_iterations` 是"**再训多少轮**"，不是"总共训到多少轮"
+
+rsl-rl 的循环是这么写的（`on_policy_runner.py` L77-79）：
+
+```python
+start_it = self.current_learning_iteration              # 从 checkpoint 恢复的轮次
+total_it = start_it + num_learning_iterations           # ← 加，不是赋值
+for it in range(start_it, total_it):
+```
+
+举例：已经训到 **2000 轮**，想再练 2000 轮：
+
+```cmd
+:: ✅ 正确：--max_iterations 2000  → 从 2000 续到 4000
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\train.py --task Infantry-RL-Locomotion-v0 --headless --num_envs 4096 --max_iterations 2000 --no_code_state --resume --resume_latest
+
+:: ❌ 错误：--max_iterations 4000 → 会从 2000 一路跑到 6000
+```
+
+#### 恢复的是什么
+
+`--resume` 是**真正的续训**，不是"拿权重重新微调"：
+
+| 恢复内容 | 说明 |
+|---|---|
+| actor / critic 网络权重 | ✅ |
+| **优化器状态**（Adam 动量） | ✅ 所以学习率自适应会接着来 |
+| **已完成轮次** `iter` | ✅ 所以轮次编号会接着往上数 |
+
+#### 续训后目录会变，轮次编号不变
+
+续训会**新建一个时间戳目录**，但里面的 checkpoint 编号**接着原来的数**：
+
+```
+logs/rsl_rl/infantry_rl_locomotion/
+├── 2026-10-17_14-25-45/          ← 第一次训练
+│   ├── model_1950.pt
+│   └── model_2000.pt
+└── 2026-10-17_15-30-00/          ← 续训产生的新目录
+    ├── model_2000.pt             ← 续训起点（会重新存一个）
+    ├── model_2050.pt
+    └── ...
+```
+
+`--resume_latest` 已经处理了这点：它**跨所有目录按轮次数字取最大**，
+所以无论续训多少次，永远接在"练得最多的那个"后面。
+
+#### 怎么确认续训正确启动了
+
+看训练日志第一行迭代输出：
+
+```
+Learning iteration 2000/4000     ← 起点是 2000，总数是 4000 = 2000 + 2000
+```
+
+- 起点是 **2000**（不是 0）→ 恢复成功
+- 总共是 **4000** → `--max_iterations 2000` 起了作用
+
+如果显示 `Learning iteration 0/...`，说明加载的还是初始权重，检查是否漏了 `--resume`。
+
+#### 也可以指定从哪个 checkpoint 续
+
+不想用"最新的"，想从某个特定点续：
+
+```cmd
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\train.py --task Infantry-RL-Locomotion-v0 --headless --num_envs 4096 --max_iterations 2000 --no_code_state --resume --load_run 2026-10-17_14-25-45 --checkpoint model_1000.pt
+```
+
+> ⚠️ **续训前必须先停掉当前训练**（`taskkill /F /IM python.exe`）。
+> 两个训练同时跑会抢同一块 GPU（8 GB），既慢又容易触发之前的 CUDA 崩溃。
+
+### 训练中怎么看
+
+除了常规的 `Mean reward`，重点看这四项：
+
+```
+Episode_Reward/track_lin_vel_x     ← 前进速度跟得准不准，满值约 2.0*20s
+Episode_Reward/track_ang_vel_z     ← 转弯角速度跟得准不准
+Episode_Reward/heading_error       ← 航向到了没有
+Metrics/base_velocity/error_vel_xy ← 速度误差（越小越好）
+Metrics/base_velocity/error_vel_yaw← 角速度误差（越小越好）
+```
+
+### 怎么看训练效果（回放，固定指令）
+
+键盘遥控脚本已删除，现在只用 `play.py` 按固定指令回放：
+
+```cmd
+cd /d D:\Robomaster\RL
+taskkill /F /IM python.exe
+
+:: 原地站住（vx=0，航向 0）
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\play.py --task Infantry-RL-Locomotion-Play-v0 --num_envs 1 ^
+    --checkpoint <run>\model_xxxx.pt --steps 2000 --cmd_vx 0 --cmd_heading_deg 0
+
+:: 直行 0.3 m/s
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\play.py --task Infantry-RL-Locomotion-Play-v0 --num_envs 1 ^
+    --checkpoint <run>\model_xxxx.pt --steps 2000 --cmd_vx 0.3 --cmd_heading_deg 0
+
+:: 原地左转 90 度（vx=0，航向目标 +90°）
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\play.py --task Infantry-RL-Locomotion-Play-v0 --num_envs 1 ^
+    --checkpoint <run>\model_xxxx.pt --steps 2000 --cmd_vx 0 --cmd_heading_deg 90
+
+:: 边走边转（前进 0.3 m/s，同时转向 45 度）
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\play.py --task Infantry-RL-Locomotion-Play-v0 --num_envs 1 ^
+    --checkpoint <run>\model_xxxx.pt --steps 2000 --cmd_vx 0.3 --cmd_heading_deg 45
+```
+
+不加 `--cmd_*` 就用环境的随机指令。
+
+回放看这几行：
+
+```
+[play] base_z mean=0.19xx m                     ← 应接近 0.19（不再蹲着跑）
+[play] heading: net turn=... max |deviation|   ← 转向是否到达目标
+[play] position: net displacement=(x, y)       ← 走了多远
+```
+
+---
+
+## 7.8 运动任务的目标设计（为什么这么配权重）
+
+> 这一节解释 7.7 里那些权重是怎么来的，改行为时照着调。
+
+### 需求
+
+1. base 保持平衡
+2. **pitch 尽量为 0**（前进、后退、原地旋转时都如此）
+3. 行进中转弯**可以靠倾斜机身**实现
+4. 转弯要够快
+
+### 之前的问题（实测）
+
+`model_4999`（旧奖励，5000 轮）跑起来：
+
+```
+base_z mean = 0.1399 m      ← 正常站立约 0.19，蹲了 5 cm
+```
+
+原因：旧奖励用 `base_height_l2`（平方，权重 −10）。在 5 cm 偏差下
+每步只贡献约 `0.05² × 10 × 0.02 = 0.0005`，而速度跟踪奖励有 `0.04` ——
+**差了 80 倍**，所以"蹲着跑更快"这个交易永远划算。
+
+### 新奖励设计
+
+| 奖励项 | 权重 | 形式 | 作用 |
+|---|---|---|---|
+| `alive` | +0.5 | — | 活着 |
+| `fall_penalty` | −50 | — | 摔了重罚 |
+| **`base_height`** | **−10** | **L1** `\|h−h0\|` | 锁住站立高度，不再蹲 |
+| **`pitch`** | **−3** | **L1** `\|pitch\|` | **pitch 归零** |
+| `roll` | −0.3 | L1 `\|roll\|` | 只做轻微约束，**允许压弯** |
+| `lin_vel_z` | −2 | L2 | 不许上下颠 |
+| `track_lin_vel_x` | +2.0 | exp | 前进速度跟踪 |
+| **`track_ang_vel_z`** | **+2.5** | exp | 角速度跟踪（权重更高 → 转得更利落） |
+| `heading_error` | −0.4 | L2 | 真的转到目标航向 |
+| `lin_vel_y` | −0.5 | L2 | 不许横向滑 |
+| `action_rate` / `joint_torques` / `joint_acc` / `wheel_spin` | 极小 | L2 | 平滑 |
+| `closure_residual` | −1000 | L2 | 五连杆闭环必须闭合 |
+
+### 三个关键设计决定
+
+**① 用 L1（绝对值）而不是 L2（平方）**
+
+`x²` 的梯度在 0 附近趋于 0、远处才变大，所以要么压不住小偏差、
+要么一大就爆。`|x|` 的梯度是常数，从任何距离都以恒定力往回拉 ——
+这正好是"pitch 保持在 0"想要的。
+
+**② 把 `flat_orientation_l2` 拆成 pitch 和 roll**
+
+原来的 `flat_orientation_l2` 惩罚 `投影重力 x²+y²`，**同时约束 roll 和 pitch**。
+但两轮机器人**没有横向力来源**，高速转弯必须靠**侧倾（roll）**让重力提供向心力
+—— 这就是你说的"倾斜机身转弯"。所以：
+
+- **pitch**：强力拉回 0（−3）
+- **roll**：只给 −0.3 的象征性约束（防止侧翻），不阻止压弯
+
+> 侧倾角度不需要专门奖励去"教"——物理会自然逼出来：
+> 轮子不提供横向力，不压弯就转不了弯。把 roll 放开即可。
+
+**③ 转弯要快：加大指令范围 + 加大 heading P 增益**
+
+| 参数 | 旧值 | 新值 | 效果 |
+|---|---|---|---|
+| `ANG_VEL_Z_RANGE` | ±1.5 rad/s | **±2.5 rad/s** | 最大 143°/s |
+| `HEADING_STIFFNESS` | 0.9 | **1.5** | 1 rad 航向误差直接要满舵 |
+| `track_ang_vel_z` 权重 | +2.0 | **+2.5** | 角速度跟踪优先于平移 |
+
+### 观测维度**没变**（仍 31 维）→ 可以直接续训
+
+这一点很重要：这次只改了奖励和指令范围，**没有改观测**，
+所以 `model_4999` 可以直接接着训，不用从零开始。
+
+```cmd
+cd /d D:\Robomaster\RL
+taskkill /F /IM python.exe
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\train.py --task Infantry-RL-Locomotion-v0 --headless --num_envs 4096 --max_iterations 3000 --no_code_state --resume --resume_latest
+```
+
+> 改成新奖励后，**头几百轮奖励会明显下跌**（`base_z` 从 0.14 被拉向 0.19，
+> 走路变"别扭"），这是策略在重新学站姿，正常。看 `base_z` 是否回到 0.19 附近。
+
+---
+
+## 7.9 训练加速（不改硬件）
+
+### 先看清瓶颈：不是 GPU 算力，是 CPU 发射
+
+实测 1024 环境训练时：
+
+```
+GPU 利用率   : 35% ~ 43%     ← 只用了四成
+显存占用     : 3.6 GB / 8.2 GB
+每轮耗时     : 1.18 s（24 个控制步）→ 每控制步 49 ms
+```
+
+GPU 大半时间在**等 CPU 派活**。原因是每个控制步要发**成百上千个小 CUDA kernel**，
+而每个 kernel 的 Python/驱动开销约 10~30 µs，加起来就是几十毫秒。
+
+### 用两轮数据拟合出的耗时模型
+
+| 环境数 | 实测每轮耗时 |
+|---|---|
+| 1024 | 1.18 s |
+| 4096 | 2.65 s（历史数据） |
+
+拟合 `t = a + b·N`：
+
+```
+b（每环境成本）= 4.8e-4 s
+a（与环境数无关的固定成本）= 0.69 s   ← 占 1024 时的 58%！
+```
+
+**这 0.69 s 就是"每步 CPU 开销 × 24 步"**，它与环境数无关 —— 所以
+**加环境数几乎不增加这 0.69 s，却能线性增加数据量**，这是最大的杠杆。
+
+### 已经做掉的优化（代码已改，不改变数值行为）
+
+| 优化 | 说明 | 依据 |
+|---|---|---|
+| **消除每步 GPU 同步** | `knee_clamped_total` 从 `int(x.sum().item())` 改成 GPU 标量；从 `extras` 里删掉每步的 `max().item()` | 每个 `.item()` 都强制 CUDA→CPU 同步，会卡住流水线 |
+| **去掉重复计算** | `measured_closure_norm()` 每步被算了 2 次（奖励一次、日志一次），改成缓存复用 | 少一半相关 kernel |
+| **牛顿求解器 3 → 2 次迭代** | 400 组可行 hip 组合实测：2 次迭代最大残差 **3.6 µm**，而仿真实际只能做到 **750 µm** | 精度完全够，少 ~150 个 kernel/步 |
+| **解析雅可比替代有限差分** | 原来每次迭代要算 3 次闭环函数（12 次旋转），现在只需 1 次闭环 + 解析导数（约 4 次旋转） | A/B 实测：2 次迭代残差从 3.6e-6 降到 **6.0e-7 m**，更准 |
+
+合并效果：求解器 kernel 数量约为原来的 **1/4.5**，且不再有每步同步点。
+
+### 最大的杠杆：提高 `--num_envs`
+
+| 环境数 | 吞吐（步/秒） | 相对 1024 |
+|---|---|---|
+| 1024 | 20,800 | — |
+| 1536 | 25,900 | **+24%** |
+| **2048** | **29,400** | **+41%** |
+| 3072 | 34,100 | **+64%** |
+| 4096 | 37,100 | +78%（但会崩，见下） |
+
+4096 崩溃的原因是 **BAR1（PCIe 显存窗口）耗尽**（8164/8192 MiB），不是显存不够。
+现在有开关可以试：
+
+```cmd
+:: 关掉 fabric（崩溃就发生在它里面），试 2048
+set INFANTRY_RL_USE_FABRIC=0
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\train.py --task Infantry-RL-Locomotion-v0 --headless --num_envs 2048 --max_iterations 100 --no_code_state --run_name speed_test
+```
+
+**建议按 1536 → 2048 → 3072 阶梯试**，每个跑 100 轮看是否稳定、记下 `Mean reward` 是否正常。
+
+### 还可以试的（有风险，需要验证）
+
+| 手段 | 预期收益 | 风险 |
+|---|---|---|
+| `INFANTRY_RL_PHYSX_POS_ITERS=4`（默认 8） | 减少 PhysX 求解器负载 | 物理精度下降，可能影响行走 |
+| `sim.dt` 0.005→0.01，`decimation` 4→2 | 物理子步减半，**最多快 2×** | 轮子高速摩擦可能不稳定，需重新验证 |
+| 关闭其他占 GPU 的程序（浏览器/EDA 软件） | 腾出显存给更多环境 | 无 |
+
+### 怎么测速
+
+```cmd
+cd /d D:\Robomaster\RL
+set INFANTRY_RL_USE_FABRIC=0
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\train.py --task Infantry-RL-Locomotion-v0 --headless --num_envs 2048 --max_iterations 100 --no_code_state --run_name speed_test
+```
+
+训练日志里找 `Learning iteration` 的时间戳，或者看每 50 轮的 checkpoint 文件时间间隔：
+**50 轮的实际耗时**就是最准的指标。对比公式：
+
+```
+吞吐（步/秒） = 24 × num_envs / 每轮耗时
+```
+
+---
+
+## 8. 相关脚本
+
+| 脚本 | 用途 |
+|---|---|
+| `scripts\train.py` | 训练入口 |
+| `scripts\play.py` | 回放/评估 |
+| `scripts\smoke_test.py` | 闭环 + 站立验证（不开训练也能跑） |
+| `scripts\diag_clone.py` | 诊断多环境卡死 |
+| `scripts\build_proxy_asset.py` | 生成轻量代理资产 |
+| `isaac_ws_infantry\kinematics\test_leg_model.py` | 运动学验证（秒级，不需要 GPU） |
+
+完整背景见 [`VERIFIED_RESULTS.md`](VERIFIED_RESULTS.md) 与 [`DESIGN.md`](DESIGN.md)。
