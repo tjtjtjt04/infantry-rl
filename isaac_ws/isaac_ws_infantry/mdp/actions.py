@@ -104,6 +104,25 @@ class FiveBarJointAction(ActionTerm):
         #: cache for :meth:`measured_closure_norm`, invalidated once per control step
         self._closure_cache: torch.Tensor | None = None
 
+        # --- leg-rate estimation (dL0, dphi) -----------------------------
+        # The firmware LQR state is [theta, dtheta, xb, dxb, phi, dphi], i.e. the leg
+        # angle RATE is a first-class control signal (it is what damped the phi loop;
+        # the Tp row of K has a gain of ~5.9 on dphi).  Our MLP policy has no memory,
+        # so unless dL0/dphi are fed in explicitly the legs can only use position
+        # feedback and will lag / oscillate when they start carrying the attitude loop.
+        #
+        # These are obtained by finite-differencing the MEASURED (L0, phi) over one
+        # control step -- one extra FK evaluation per step.  Computing the analytic
+        # Jacobian J = d(L0, phi)/d(q1, q4) instead would cost 4 more Newton solves per
+        # step, and this environment is already launch-bound on the CPU.
+        #: previous measured (L0_l, phi_l, L0_r, phi_r)
+        self._leg_state_prev = torch.zeros(self.num_envs, 4, device=self.device)
+        #: which envs have a valid previous sample (cleared on reset to avoid the
+        #: huge fake rate that a reset pose jump would otherwise produce)
+        self._leg_prev_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        #: last estimated (dL0_l, dphi_l, dL0_r, dphi_r)
+        self.leg_rate = torch.zeros(self.num_envs, 4, device=self.device)
+
     # ------------------------------------------------------------------ #
     # properties required by ActionTerm
     # ------------------------------------------------------------------ #
@@ -278,6 +297,10 @@ class FiveBarJointAction(ActionTerm):
         if env_ids is None:
             env_ids = slice(None)
         self._raw_actions[env_ids] = 0.0
+        # the pose jumps on reset, so the stored leg state is no longer a valid
+        # previous sample -- the first post-reset rate is reported as zero
+        self._leg_prev_valid[env_ids] = False
+        self.leg_rate[env_ids] = 0.0
         if isinstance(env_ids, slice):
             self._knee_seed[:] = self.model.nominal_knees.view(1, 2, 2)
             self._knee_targets[:] = self._nominal_knees
@@ -351,6 +374,31 @@ class FiveBarJointAction(ActionTerm):
         hip_pos = self._robot.data.joint_pos[:, self._hip_ids]
         knee_pos = self._robot.data.joint_pos[:, self._knee_ids]
         return self.model.measured_leg_state(hip_pos, knee_pos)
+
+    def update_leg_rates(self) -> torch.Tensor:
+        """Estimate ``(dL0, dphi)`` per side from the measured leg state, ``(N, 4)``.
+
+        Finite difference over one control step.  The order matches
+        :meth:`measured_leg_state`, i.e. ``(dL0_l, dphi_l, dL0_r, dphi_r)``.
+
+        This is the leg-velocity feedback the firmware LQR gets from its
+        ``dleg_axis_body_rad_s`` state; without it the policy could only react to the
+        leg *position* and would lag one derivative behind when the legs carry the
+        attitude loop.
+
+        Called once per control step from the observation term.  Environments that have
+        just been reset report zero (their pose jumped, so a difference would be
+        meaningless).
+        """
+        state = self.measured_leg_state()
+        dt = float(self._env.step_dt)
+        fresh = self._leg_prev_valid
+        # where a previous sample exists, differentiate; elsewhere stay at zero
+        rate = (state - self._leg_state_prev) / dt
+        self.leg_rate = torch.where(fresh.unsqueeze(-1), rate, torch.zeros_like(rate))
+        self._leg_state_prev = state
+        self._leg_prev_valid[:] = True
+        return self.leg_rate
 
 
 @configclass

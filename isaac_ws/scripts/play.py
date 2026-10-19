@@ -176,6 +176,11 @@ def main(env_cfg, agent_cfg: RslRlBaseRunnerCfg):
     yaw_rates = []
     rolls = []
     pitches = []
+    hip_devs = []
+    phis = []
+    l0_spans = []
+    dphis = []
+    dl0s = []
     xs = []
     ys = []
     vxs = []
@@ -234,6 +239,28 @@ def main(env_cfg, agent_cfg: RslRlBaseRunnerCfg):
         p = robot.data.root_pos_w[0] - origins[0]
         return float(p[0]), float(p[1])
 
+    # ------------------------------------------------------------------ #
+    # leg activity -- the metric that answers "are the legs actually doing
+    # anything, or is the robot balancing purely with the wheels?"
+    #
+    # A wheel-only balance keeps the hips pinned at the nominal stance, so all of
+    # these stay near zero.  A leg-based (inverted-pendulum) balance must move the
+    # hips to shift the body over the wheel, so |hip deviation| and |phi| grow.
+    # ------------------------------------------------------------------ #
+    _joints = env.unwrapped.action_manager.get_term("joints")
+
+    def _leg_metrics():
+        """(mean |hip deviation| rad, mean |phi| rad, L0 span m, |dphi| rad/s, |dL0| m/s)."""
+        hip_dev = (_joints._hip_targets[0] - _joints.nominal_hips[0]).abs().mean().item()
+        state = _joints.solved_leg_state()[0]  # (L0_l, phi_l, L0_r, phi_r)
+        phi = 0.5 * (abs(float(state[1])) + abs(float(state[3])))
+        l0_span = abs(float(state[0]) - float(state[2]))
+        # leg rates are already maintained by the observation term every step
+        rate = _joints.leg_rate[0]  # (dL0_l, dphi_l, dL0_r, dphi_r)
+        dphi = 0.5 * (abs(float(rate[1])) + abs(float(rate[3])))
+        dl0 = 0.5 * (abs(float(rate[0])) + abs(float(rate[2])))
+        return float(hip_dev), phi, l0_span, dphi, dl0
+
     for step in range(steps):
         start_time = time.time()
         with torch.inference_mode():
@@ -250,6 +277,12 @@ def main(env_cfg, agent_cfg: RslRlBaseRunnerCfg):
         _roll, _pitch = _roll_pitch()
         rolls.append(_roll)
         pitches.append(_pitch)
+        _hdev, _phi, _l0, _dphi, _dl0 = _leg_metrics()
+        hip_devs.append(_hdev)
+        phis.append(_phi)
+        l0_spans.append(_l0)
+        dphis.append(_dphi)
+        dl0s.append(_dl0)
         _x, _y = _xy()
         xs.append(_x)
         ys.append(_y)
@@ -296,6 +329,18 @@ def main(env_cfg, agent_cfg: RslRlBaseRunnerCfg):
     max_roll = math.degrees(max(abs(v) for v in rolls))
     mean_pitch = math.degrees(sum(abs(v) for v in pitches) / n)
     max_pitch = math.degrees(max(abs(v) for v in pitches))
+
+    # leg-activity summary: tells a wheel-only balance apart from a leg-based one
+    nl = max(1, len(hip_devs))
+    mean_hip_dev = math.degrees(sum(hip_devs) / nl)
+    max_hip_dev = math.degrees(max(hip_devs))
+    mean_phi = math.degrees(sum(phis) / nl)
+    max_phi = math.degrees(max(phis))
+    mean_l0_span = 1000.0 * sum(l0_spans) / nl  # mm
+    mean_dphi = sum(dphis) / max(1, len(dphis))
+    max_dphi = max(dphis) if dphis else 0.0
+    mean_dl0 = sum(dl0s) / max(1, len(dl0s))
+
     print(
         f"[play] steps={steps}  base_z mean={sum(heights) / len(heights):.4f} m  "
         f"max closure residual={max(residuals):.3e} m\n"
@@ -303,6 +348,11 @@ def main(env_cfg, agent_cfg: RslRlBaseRunnerCfg):
         f"mean |yaw rate|={sum(abs(v) for v in yaw_rates) / max(1, len(yaw_rates)):.3f} rad/s\n"
         f"[play] attitude: mean |pitch|={mean_pitch:.2f} deg (max {max_pitch:.2f})  "
         f"mean |roll|={mean_roll:.2f} deg (max {max_roll:.2f})\n"
+        f"[play] legs: mean |hip dev|={mean_hip_dev:.2f} deg (max {max_hip_dev:.2f})  "
+        f"mean |phi|={mean_phi:.2f} deg (max {max_phi:.2f})  "
+        f"mean |dphi|={mean_dphi:.2f} rad/s (max {max_dphi:.2f})\n"
+        f"[play] stance: mean |dL0|={mean_dl0:.3f} m/s  "
+        f"mean |L0_left - L0_right|={mean_l0_span:.2f} mm\n"
         f"[play] position: net displacement=({xs[-1] - xs[0]:+.3f}, {ys[-1] - ys[0]:+.3f}) m  "
         f"max |x|={max(abs(v - xs[0]) for v in xs):.3f} m  "
         f"mean |vx|={sum(abs(v) for v in vxs) / max(1, len(vxs)):.3f} m/s"

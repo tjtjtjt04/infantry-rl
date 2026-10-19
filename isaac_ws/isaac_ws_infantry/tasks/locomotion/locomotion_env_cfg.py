@@ -40,6 +40,7 @@ from isaaclab.managers import CommandTermCfg
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
+from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.utils import configclass
 
@@ -92,7 +93,7 @@ class LocomotionCommandsCfg:
 
 @configclass
 class LocomotionObservationsCfg:
-    """Observation specifications for the MDP (31 dims)."""
+    """Observation specifications for the MDP (35 dims)."""
 
     @configclass
     class PolicyCfg(ObsGroup):
@@ -101,6 +102,14 @@ class LocomotionObservationsCfg:
         Compared with the balance task, the fixed ``heading`` and ``position`` dims are
         replaced by the ``velocity_commands``: the target is no longer "stay at 0" but
         "track this (vx, wz)", so the command *is* the goal.
+
+        ``leg_rates`` was added so the hips can be the attitude actuator.  The firmware
+        controller this robot is based on (``infantry-chassis``: LQR + VMC) uses the
+        state ``[theta, dtheta, xb, dxb, phi, dphi]``, i.e. it feeds back the leg-angle
+        RATE explicitly (the ``Tp`` row of its gain matrix has a gain of ~5.9 on
+        ``dphi``).  An MLP has no memory, so without ``dL0``/``dphi`` as inputs the legs
+        can only do proportional feedback on their pose and will lag when they start
+        carrying the pitch/roll loop.
         """
 
         # base state
@@ -121,6 +130,10 @@ class LocomotionObservationsCfg:
         # last action and the solved leg length / angle
         last_action = ObsTerm(func=mdp.last_action_raw, params={"action_name": "joints"})
         solved_leg_state = ObsTerm(func=mdp.solved_leg_state, params={"action_name": "joints"})
+
+        # leg-length / leg-angle rates (dL0_l, dphi_l, dL0_r, dphi_r):
+        # the "dphi" of the reference LQR state, needed to damp the leg attitude loop
+        leg_rates = ObsTerm(func=mdp.leg_rates, params={"action_name": "joints"})
 
         def __post_init__(self):
             self.enable_corruption = False
@@ -161,10 +174,16 @@ class LocomotionRewardsCfg:
     # -- hold the stance -------------------------------------------------
     # L1 terms: a constant pull from any distance, see mdp.rewards.pitch_abs /
     # base_height_abs for why the squared versions were not enough.
+    #
+    # base_height is deliberately relaxed to -4 (was -10): a leg-based balance strategy
+    # HAS to change the stance -- leaning the leg by phi drops the body by
+    # L0*(1-cos(phi)) (~1.5 cm at 20 deg) and lengthening/shortening the leg changes it
+    # even more.  Penalising that at -10 pushes the policy straight back to "rigid legs".
     base_height = RewTerm(
-        func=mdp.base_height_abs, weight=-10.0, params={"target_height": NOMINAL_HEIGHT}
+        func=mdp.base_height_abs, weight=-4.0, params={"target_height": NOMINAL_HEIGHT}
     )
-    pitch = RewTerm(func=mdp.pitch_abs, weight=-3.0)
+    # pitch stays the strict quantity: this is what the legs are supposed to regulate.
+    pitch = RewTerm(func=mdp.pitch_abs, weight=-4.0)
 
     # -- walk upright, but bank freely while cornering --------------------
     # The previous -0.3 "token" weight was what let the policy settle into a permanent
@@ -196,9 +215,38 @@ class LocomotionRewardsCfg:
     # no lateral actuator -> skidding sideways is never the right answer
     lin_vel_y = RewTerm(func=mdp.lin_vel_y_l2, weight=-0.5)
 
+    # -- make the LEGS the balancing actuator ----------------------------
+    # Pitch is controllable by two redundant actuators on this robot:
+    #   (a) wheel torque -- the reaction torque twists the body (Segway style);
+    #   (b) the hips    -- changing the leg angle phi slides the body's centre of
+    #                     gravity fore/aft over the wheel contact (inverted-pendulum
+    #                     style), which needs no wheel torque at all.
+    # Nothing in the old reward set charged anything for (a): with joint_torques at
+    # -1e-4 a 2 Nm wheel torque costs 8e-6 per step against an alive bonus of 1e-2,
+    # i.e. 1250x cheaper than staying alive.  PPO therefore kept the legs rigid and
+    # balanced entirely with the wheels.
+    #
+    # `wheel_torques` charges only the WHEEL joints, so it does not discourage the
+    # hips.  Inverted-pendulum locomotion by leaning needs almost no wheel torque
+    # (the wheels only have to roll under the body), while wheel-torque balancing
+    # spikes into the 1-3 Nm range.  This term is what flips the trade-off.
+    wheel_torques = RewTerm(
+        func=base_mdp.joint_torques_l2,
+        weight=-5.0e-2,
+        params={
+            "asset_cfg": SceneEntityCfg(
+                "robot", joint_names=["left_wheel", "right_wheel"], preserve_order=True
+            )
+        },
+    )
+
     # -- smooth actuation ------------------------------------------------
-    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1.0e-2)
-    joint_torques = RewTerm(func=mdp.joint_torques_l2, weight=-1.0e-4)
+    # action_rate is relaxed (was -1e-2): the legs must be allowed to move FAST to
+    # track pitch/roll, otherwise the penalty alone keeps them stiff.
+    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-4.0e-3)
+    # joint_torques covers the hips too, so keep it light (was -1e-4) -- penalising
+    # hip torque directly fights the behaviour we want.
+    joint_torques = RewTerm(func=mdp.joint_torques_l2, weight=-2.0e-5)
     joint_acc = RewTerm(func=mdp.joint_acc_l2, weight=-1.0e-7)
     wheel_spin = RewTerm(func=mdp.wheel_spin_l2, weight=-1.0e-4, params={"action_name": "joints"})
 

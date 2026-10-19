@@ -132,6 +132,19 @@ def measured_leg_state(env, action_name: str = "joints") -> torch.Tensor:
     return _action_term(env, action_name).measured_leg_state()
 
 
+def leg_rates(env, action_name: str = "joints") -> torch.Tensor:
+    """Leg-length and leg-angle rates, ``(N, 4)``: ``(dL0_l, dphi_l, dL0_r, dphi_r)``.
+
+    Units are m/s and rad/s.  These are the ``dL0`` / ``dphi`` states of the firmware
+    LQR (``x = [theta, dtheta, xb, dxb, phi, dphi]``): the pose alone only tells the
+    policy *where* the leg is, not how fast it is moving, so without these dims the
+    leg attitude loop can only use proportional feedback and lags one derivative
+    behind.  Estimated by one-step finite difference inside the action term, and
+    reported as zero for the step right after a reset.
+    """
+    return _action_term(env, action_name).update_leg_rates()
+
+
 def closure_residual(env, action_name: str = "joints") -> torch.Tensor:
     """Measured ``|W - E|`` per side, ``(N, 2)`` in metres."""
     return _action_term(env, action_name).measured_closure_norm()
@@ -169,6 +182,7 @@ __all__ = [
     "hip_pos_rel_nominal",
     "knee_pos_rel_solved",
     "last_action_raw",
+    "leg_rates",
     "measured_leg_state",
     "position_error",
     "solved_leg_state",
