@@ -8,3 +8,6 @@ logs/
 *.usdc
 *.STL
 *.stl
+
+# Hydra 每次运行自动生成的配置转储，不是源码也不是训练数据
+outputs/

@@ -3,13 +3,13 @@
 Nothing in this module is hand-derived:
 
 * the planar leg model, its rotation signs, the loop solver and the batched torch
-  solver come from :mod:`isaac_ws_infantry.kinematics.leg_model`, which is
+  solver come from :mod:`isaac_ws_infantry.kinematics.planar_leg`, which is
   verified against an exact double-precision URDF forward kinematics;
 * the numeric model constants (``A, B, P, Q, S, T`` and the signs) come from the
-  measured dump ``isaac_ws/config/leg_model.json``;
+  measured dump ``isaac_ws/config/planar_leg.json``;
 * the nominal standing pose comes from ``isaac_ws/config/nominal_pose.json``;
 * the loop-anchor offsets used to *measure* the closure error from simulated body
-  poses come from the URDF itself (the same source ``leg_model`` was fitted to).
+  poses come from the URDF itself (the same source ``planar_leg`` was fitted to).
 
 The kinematics package is imported read-only: this file never writes to it.
 """
@@ -66,7 +66,7 @@ _KINEMATICS_DIR = Path(__file__).resolve().parent / "kinematics"
 if str(_KINEMATICS_DIR) not in sys.path:
     sys.path.insert(0, str(_KINEMATICS_DIR))
 
-from leg_model import LegPlanar, make_torch_loop_solver  # noqa: E402
+from planar_leg import LegPlanar, make_torch_loop_solver  # noqa: E402
 
 SIDES: tuple[str, ...] = ("left", "right")
 
@@ -129,13 +129,13 @@ WHEEL_RADIUS: float = 0.068
 
 
 @lru_cache(maxsize=1)
-def _leg_model_json() -> dict:
-    return _load_json(CONFIG_DIR / "leg_model.json")
+def _planar_leg_json() -> dict:
+    return _load_json(CONFIG_DIR / "planar_leg.json")
 
 
 def hip_axis_height() -> float:
     """Height of the hip-axis midpoint above the ``base_link`` origin (m)."""
-    data = _leg_model_json()
+    data = _planar_leg_json()
     return float(sum(0.5 * (data[s]["A"][1] + data[s]["B"][1]) for s in SIDES) / len(SIDES))
 
 
@@ -169,11 +169,11 @@ def joint_limits() -> dict[str, tuple[float, float]]:
 def loop_anchor_offsets() -> dict[str, tuple[float, float, float]]:
     """Offset of the loop anchor in the ``*_back_calf`` link frame, per side.
 
-    Read from the URDF that ``leg_model`` was fitted to (``<loop_joint>`` /
+    Read from the URDF that ``planar_leg`` was fitted to (``<loop_joint>`` /
     ``link2/xyz``).  Its magnitude is ~0.2715 m on the left leg, which is exactly
     the ``|p(wheel) - p(back_calf)|`` distance measured in the PhysX probe.
     """
-    from five_bar import UrdfTree  # noqa: PLC0415  (kept lazy: needs numpy only)
+    from urdf_tree import UrdfTree  # noqa: PLC0415  (kept lazy: needs numpy only)
 
     tree = UrdfTree(URDF_PATH)
     out: dict[str, tuple[float, float, float]] = {}
@@ -204,7 +204,7 @@ class FiveBarModel:
     """Batched interface to the verified leg model, in the action-vector layout."""
 
     def __init__(self, device: str | torch.device = "cpu", iters: int = 3):
-        data = _load_json(CONFIG_DIR / "leg_model.json")
+        data = _load_json(CONFIG_DIR / "planar_leg.json")
         self.device = torch.device(device)
         self.runtime: dict[str, LegRuntime] = {}
         for side in SIDES:

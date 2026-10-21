@@ -21,7 +21,7 @@ PASS requires: 10 DOFs with the expected names, max loop error < 5 mm, and the b
 staying within 5 cm of the measured nominal stance height for all 200 steps.
 
 Run:
-    D:\\miniconda\\envs\\RM\\python.exe isaac_ws\\scripts\\smoke_test.py --headless
+    D:\\miniconda\\envs\\RM\\python.exe isaac_ws\\scripts\\check_robot.py --headless
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ parser.add_argument("--hip_action_range", type=float, default=0.35, help="Unifor
 parser.add_argument("--wheel_action_range", type=float, default=0.2, help="Uniform range of the raw wheel action.")
 parser.add_argument("--seed", type=int, default=0, help="Random seed for the actions.")
 parser.add_argument(
-    "--report", type=str, default=str(_HERE / "smoke_test_report.json"), help="Where to write the JSON report."
+    "--report", type=str, default=str(_HERE / "check_robot_report.json"), help="Where to write the JSON report."
 )
 parser.add_argument("--residual_tol", type=float, default=5.0e-3, help="Loop-error tolerance (m).")
 parser.add_argument("--height_tol", type=float, default=5.0e-2, help="Base-height tolerance (m).")
@@ -66,7 +66,7 @@ import torch  # noqa: E402
 import isaac_ws_infantry  # noqa: E402,F401  (registers the gym tasks)
 from isaaclab.utils.math import quat_apply  # noqa: E402
 from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
-from isaac_ws_infantry.model import (  # noqa: E402
+from isaac_ws_infantry.robot_model import (  # noqa: E402
     HIP_ORDER,
     KNEE_ORDER,
     SIDES,

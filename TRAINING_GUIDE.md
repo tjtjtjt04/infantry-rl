@@ -98,6 +98,30 @@ taskkill /F /IM python.exe
 rmdir /s /q "D:\Robomaster\RL\logs\rsl_rl\infantry_rl_locomotion"
 ```
 
+### 6. 测试跑必须与正式训练隔离，跑完立刻删
+
+`--resume_latest` 是**跨所有 run 目录找轮次最高**的 checkpoint，所以一个测试 run 只要跑超过正式训练的轮次，就会被当成"最新"接上 —— 正式训练会被悄悄污染。
+
+规矩：
+
+| 步骤 | 做法 |
+|---|---|
+| 1. 标记 | 测试命令一律加 `--run_name ZZZTEST`（目录名会带 `_ZZZTEST` 后缀） |
+| 2. 识别 | `dir /ad /b "logs\rsl_rl\infantry_rl_locomotion"` 里带 `ZZZTEST` 的就是测试 |
+| 3. 删除 | 测试结束立刻 `rmdir /s /q "logs\rsl_rl\infantry_rl_locomotion\<时间戳>_ZZZTEST"` |
+| 4. 核对 | 删完再列一次目录，确认只剩正式 run |
+
+```cmd
+:: 例：跑一个 100 轮的测试
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\train.py --task Infantry-RL-Locomotion-v0 --headless --num_envs 1024 --max_iterations 100 --no_code_state --run_name ZZZTEST
+
+:: 测试结束后删掉（换成实际的目录名）
+rmdir /s /q "D:\Robomaster\RL\logs\rsl_rl\infantry_rl_locomotion\2026-10-20_11-30-00_ZZZTEST"
+```
+
+> 同理，测试产生的 `outputs\`（Hydra 配置转储）、临时脚本、`_*.log` 都要一起清掉。
+> **只删测试目录，不要删正式 run。**
+
 ---
 
 ## 1. 开始训练
@@ -292,17 +316,24 @@ D:\miniconda\envs\RM\python.exe isaac_ws\scripts\play.py --task Infantry-RL-Loco
 
 `play.py` 现在支持锁死速度指令，否则会用**随机指令**，看不出单项能力：
 
+**训练范围是 `vx ∈ [−2.0, +2.0] m/s`，超出这个范围策略没见过，一定会摔。**
+
 | 想看什么 | `--cmd_vx` | `--cmd_heading_deg` |
 |---|---|---|
 | 站住不动 | `0` | `0` |
-| 直行 0.3 m/s | `0.3` | `0` |
-| 后退 0.3 m/s | `-0.3` | `0` |
-| 原地左转 90° | `0` | `90` |
-| 边走边转 45° | `0.3` | `45` |
+| 慢速直行 0.3 m/s | `0.3` | `0` |
+| 中速直行 0.8 m/s | `0.8` | `0` |
+| **全速直行 1.2 m/s** | `1.2` | `0` |
+| 慢速后退 | `-0.3` | `0` |
+| 高速后退 | `-2.0` | `0` |
+
 
 ```cmd
-:: 例：直行
+:: 例：慢速直行
 D:\miniconda\envs\RM\python.exe isaac_ws\scripts\play.py --task Infantry-RL-Locomotion-Play-v0 --num_envs 1 --load_run .* --checkpoint model_5000.pt --cmd_vx 0.3 --cmd_heading_deg 0 --steps 3000 --real-time
+
+:: 例：全速直行
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\play.py --task Infantry-RL-Locomotion-Play-v0 --num_envs 1 --load_run .* --checkpoint model_5000.pt --cmd_vx 2.0 --cmd_heading_deg 0 --steps 3000 --real-time
 
 :: 例：原地旋转
 D:\miniconda\envs\RM\python.exe isaac_ws\scripts\play.py --task Infantry-RL-Locomotion-Play-v0 --num_envs 1 --load_run .* --checkpoint model_5000.pt --cmd_vx 0 --cmd_heading_deg 90 --steps 1500 --real-time
@@ -372,8 +403,8 @@ D:\miniconda\envs\RM\python.exe isaac_ws\scripts\play.py --task Infantry-RL-Loco
 
 | 任务名 | 用途 | 观测维度 |
 |---|---|---|
-| `Infantry-RL-Locomotion-v0` | **训练（主任务）** | 31 |
-| `Infantry-RL-Locomotion-Play-v0` | 回放 | 31 |
+| `Infantry-RL-Locomotion-v0` | **训练（主任务）** | **35** |
+| `Infantry-RL-Locomotion-Play-v0` | 回放 | **35** |
 | `Infantry-RL-Balance-v0` | 训练（旧任务：原地保持航向/位置） | 33 |
 | `Infantry-RL-Balance-Play-v0` | 回放（旧任务） | 33 |
 
@@ -386,41 +417,62 @@ D:\miniconda\envs\RM\python.exe isaac_ws\scripts\play.py --task Infantry-RL-Loco
 | 环境数 | 1024 |
 | 动作 | 6 维（4 髋位置 + 2 轮速） |
 | 观测 | **35 维** + `EmpiricalNormalization` 运行时归一化 |
+| 网络 | **[128, 128, 64]**，ELU |
 | 控制频率 | 50 Hz（物理 200 Hz，decimation 4） |
 | 回合长度 | 20 s |
 | 每轮样本 | 48 × 1024 = **49,152** |
-| 梯度更新 | 5 epochs × 4 minibatches = 20 次/轮 |
-| `save_interval` | 100 轮 |
-| 每轮耗时 | 约 **1.8 s** |
+| 梯度更新 | **8 epochs × 4 minibatches = 32 次/轮** |
+| `save_interval` | **50** 轮 |
+| 探索噪声 std | `entropy_coef=0.003`，硬限幅 **[0.06, 0.4]** |
+| 每轮耗时 | 约 **1.9~2.0 s** |
 | 闭环求解 | 解析雅可比 + 2 次牛顿迭代 |
 
-**指令范围**：`vx` ±0.5 m/s，`wz` ±2.5 rad/s，航向目标 −π~+π（每 5~10 s 换一次）。
+**指令范围（v1.0.4 起是"纯直线"模式）**：
 
-**18 项奖励**：
-
-| 项 | 权重 | 作用 |
+| 项目 | 值 | 说明 |
 |---|---|---|
-| `alive` | +0.5 | 活着 |
-| `fall_penalty` | −50 | 摔了重罚 |
-| `base_height` | −4（L1） | 保持站立高度（从 −10 放宽，给腿部动作留空间） |
-| **`pitch`** | **−4（L1）** | **pitch 严格归零** |
-| `roll` | −1.5（L1） | 基础侧倾约束 |
-| `roll_straight` | −2.5 | 直行时重罚侧倾；转弯时放开 |
-| `roll_rate` | −0.1 | 抑制侧向摆动 |
-| `lin_vel_z` | −2 | 不许上下颠 |
-| `track_lin_vel_x` | +2.0 | 前进速度跟踪 |
-| `track_ang_vel_z` | +2.5 | 角速度跟踪 |
-| `heading_error` | −0.4 | 真的转到目标航向 |
-| `lin_vel_y` | −0.5 | 不许横向滑 |
-| **`wheel_torques`** | **−0.05** | **只罚轮子力矩 → 逼髋关节主导平衡** |
-| `action_rate` | −0.004 | 从 −0.01 放宽，允许腿部快速响应 |
-| `joint_torques` | −2e-5 | 从 −1e-4 大幅放宽，不压制髋关节出力 |
-| `joint_acc` | −1e-7 | 平滑 |
-| `wheel_spin` | −1e-4 | 轮子空转 |
-| `closure_residual` | −1000 | 五连杆闭环必须闭合 |
+| `vx` 前进速度 | **[+0.2, +1.2] m/s** | 可用 `INFANTRY_RL_VX_MIN` / `INFANTRY_RL_VX_MAX` 改 |
+| 航向目标 | **固定 0** | 转弯已关闭 |
+| `wz` 实际命令 | `clip(1.5 × wrap(0 − ψ), ±2.5)` | **只用于纠正航向漂移**，不主动转弯 |
 
-> ⭐ **`wheel_torques` 是关键改动**（详见 §7.10）。它让"用轮子扭动来平衡"变贵，
-> 于是髋关节（改变腿角 φ 移动 CG）成为更划算的平衡方式。
+> 想要回转弯能力：`set INFANTRY_RL_ENABLE_TURNING=1`，航向目标恢复随机采样 −π~+π。
+> 启动日志会打印 `[cfg] turning : DISABLED / ENABLED`。
+
+⚠️ **直线模式下不要用 `--cmd_heading_deg` 测试转弯** —— 那是训练分布外的输入。
+
+**24 项奖励**：
+
+| # | 项 | 权重 | 作用 |
+|---|---|---|---|
+| 1 | `alive` | +0.5 | 活着 |
+| 2 | `fall_penalty` | −50 | 摔了重罚 |
+| 3 | `base_height` | −4（L1） | 保持站立高度（从 −10 放宽，给腿部动作留空间） |
+| 4 | **`pitch`** | **−4（L1）** | **pitch 严格归零** |
+| 5 | `roll` | −1.5（L1） | 基础侧倾约束 |
+| 6 | `roll_straight` | −2.5 | 直行时重罚侧倾 |
+| 7 | `roll_rate` | −0.1 | 抑制侧向摆动 |
+| 8 | `lin_vel_z` | −2 | 不许上下颠 |
+| 9 | **`track_lin_vel_x`** | **+8.0** | 前进速度跟踪（exp，**std 0.15**）**主导项** |
+| 10 | `track_ang_vel_z` | +3.0 | 角速度跟踪（exp，**std 0.15**） |
+| 9b | **`track_lin_vel_x_l1`** | **−2.0** | `\|vx−vx*\|`，**恒定梯度**，压掉最后几 cm/s |
+| 9c | **`track_lin_vel_x_l2`** | **−6.0** | `(vx−vx*)²`，大误差主导 |
+| 10b | **`track_ang_vel_z_l1`** | **−1.0** | `\|ωz−wz*\|`，yaw 恒定梯度 |
+| 10c | `track_ang_vel_z_l2` | **−2.0** | `(ωz−wz*)²` |
+| 10b | **`track_ang_vel_z_l2`** | **−1.0** | `(ωz−wz*)²`，抑制 **yaw 抖动** |
+| 11 | `heading_error` | −0.6 | 航向漂移 |
+| 12 | `lin_vel_y` | −0.5 | 不许横向滑 |
+| 13 | **`wheel_axle`** | **−8.0（L1，米）** | **左右轮轴必须对齐**（防"一前一后"） |
+| 14 | **`wheel_torques`** | **−0.05** | **只罚轮子力矩尖峰（1.0 N·m 死区）→ 逼髋关节主导平衡** |
+| 15 | `action_rate` | −0.004 | 一阶差分，放宽以便腿部快速响应 |
+| 15b | **`action_jerk`** | **−0.3** | **二阶差分，专杀腿部高频抖动**，平滑运动免费 |
+| 16 | `joint_torques` | −2e-5 | 从 −1e-4 大幅放宽，不压制髋关节出力 |
+| 17 | `joint_acc` | −1e-6 | 关节加速度（抖动最直接的度量） |
+| 18 | `wheel_spin` | −3e-5 | 轮子空转（1.2 m/s 时合法滚动 17.6 rad/s，权重要小） |
+| 19 | `closure_residual` | −1000 | 五连杆闭环必须闭合 |
+
+> ⭐ **`wheel_torques`**（§7.10）让"用轮子扭动来平衡"变贵，逼髋关节接管姿态。
+> ⭐ **`wheel_axle`** 防止策略用"左右腿角不对称"当转向执行器。
+> ⭐ **`action_jerk`** 用二阶差分区分"快速平滑动作"和"高频抖动"。
 
 > 奖励设计的推导见 §7.8；腿部主导平衡的设计见 §7.10。
 
@@ -462,8 +514,8 @@ taskkill /F /IM python.exe
 | 100 迭代（1 环境）结果 | **摔倒**，`base_z` 从 0.19 掉到 0.145 后不动 |
 | 100 迭代的闭环残差 | 6.8e-4 m（**闭环控制始终正常**） |
 | 4096 训练第 100 迭代时（历史） | `Mean reward -6.4`，`Mean episode length 500.00`（满分，还没开始摔） |
-| 闭环控制验证（`smoke_test.py`） | 残差 **0.750 mm**，200 步零跌倒 |
-| 运动学验证（`test_leg_model.py`） | 与精确 FK 误差 **1.8e-16 m** |
+| 闭环控制验证（`check_robot.py`） | 残差 **0.750 mm**，200 步零跌倒 |
+| 运动学验证（`check_planar_leg.py`） | 与精确 FK 误差 **1.8e-16 m** |
 
 > **提醒**：100 迭代 × 1 环境 = 2400 步经验，离学会平衡差 4 个数量级，摔倒完全正常。
 > 参考仓库那种效果是**几万次迭代 × 几千环境**训出来的。本机请用 1024 × ≥8000。
@@ -710,7 +762,7 @@ wz_cmd = clip(0.9 * wrap(heading_target - heading), -1.5, 1.5)
 
 | 指令 | 训练范围 |
 |---|---|
-| `vx` | −0.5 ~ +0.5 m/s |
+| `vx` | **+0.2 ~ +1.2 m/s**（训练范围） |
 | `wz` | −1.5 ~ +1.5 rad/s |
 | 航向目标 | −π ~ +π |
 | 指令保持时长 | 5 ~ 10 秒（每集 20 秒，能看到 2~4 个指令） |
@@ -724,6 +776,7 @@ cd /d D:\Robomaster\RL
 taskkill /F /IM python.exe
 D:\miniconda\envs\RM\python.exe isaac_ws\scripts\train.py --task Infantry-RL-Locomotion-v0 --headless --num_envs 1024 --max_iterations 8000 --no_code_state
 ```
+
 
 > 运动比站立难得多，**8000 轮**才算比较稳（约 6 小时）。
 > 前 500 轮可能看着像"乱蹬腿"，这是正常的 —— 先学会不摔，再学会走。
@@ -820,7 +873,7 @@ D:\miniconda\envs\RM\python.exe isaac_ws\scripts\train.py --task Infantry-RL-Loc
 除了常规的 `Mean reward`，重点看这四项：
 
 ```
-Episode_Reward/track_lin_vel_x     ← 前进速度跟得准不准，满值约 2.0*20s
+Episode_Reward/track_lin_vel_x     ← 前进速度跟得准不准，满值 8.0（/8.0 = 完成度）
 Episode_Reward/track_ang_vel_z     ← 转弯角速度跟得准不准
 Episode_Reward/heading_error       ← 航向到了没有
 Metrics/base_velocity/error_vel_xy ← 速度误差（越小越好）
@@ -889,19 +942,26 @@ base_z mean = 0.1399 m      ← 正常站立约 0.19，蹲了 5 cm
 
 ### 新奖励设计
 
+> 下表是**当前值**（v1.0.6，22 项）。完整表格与最新改动见 §5。
+
 | 奖励项 | 权重 | 形式 | 作用 |
 |---|---|---|---|
 | `alive` | +0.5 | — | 活着 |
 | `fall_penalty` | −50 | — | 摔了重罚 |
-| **`base_height`** | **−10** | **L1** `\|h−h0\|` | 锁住站立高度，不再蹲 |
-| **`pitch`** | **−3** | **L1** `\|pitch\|` | **pitch 归零** |
-| `roll` | −0.3 | L1 `\|roll\|` | 只做轻微约束，**允许压弯** |
-| `lin_vel_z` | −2 | L2 | 不许上下颠 |
-| `track_lin_vel_x` | +2.0 | exp | 前进速度跟踪 |
-| **`track_ang_vel_z`** | **+2.5** | exp | 角速度跟踪（权重更高 → 转得更利落） |
-| `heading_error` | −0.4 | L2 | 真的转到目标航向 |
+| **`base_height`** | **−4** | **L1** `\|h−h0\|` | 锁住站立高度，不再蹲（从 −10 放宽给腿留空间） |
+| **`pitch`** | **−4** | **L1** `\|pitch\|` | **pitch 归零** |
+| `roll` | −1.5 | L1 `\|roll\|` | 基础侧倾约束 |
+| `roll_straight` | −2.5 | L1 × 门控 | 直行时重罚侧倾 |
+| **`track_lin_vel_x`** | **+8.0** | exp | 前进速度跟踪（**主导项**，std 0.15） |
+| **`track_ang_vel_z`** | **+1.5** | exp | 角速度跟踪 |
+| `track_lin_vel_x_l1` / `_l2` | −2.0 / −6.0 | L1+L2 | 恒定梯度压精度 / 大误差主导 |
+| `track_ang_vel_z_l1` / `_l2` | −1.0 / −2.0 | L1+L2 | 同上（yaw） |
+| `heading_error` | −0.6 | L2 | 航向漂移 |
 | `lin_vel_y` | −0.5 | L2 | 不许横向滑 |
-| `action_rate` / `joint_torques` / `joint_acc` / `wheel_spin` | 极小 | L2 | 平滑 |
+| `wheel_axle` | −8.0 | L1（米） | 左右轮轴必须对齐 |
+| `wheel_torques` | −0.05 | L2（1 N·m 死区） | 逼髋关节主导姿态 |
+| `action_rate` / `action_jerk` | −4e-3 / −0.5 | L2 | 一阶差分放宽、二阶差分专杀抖动 |
+| `joint_torques` / `joint_acc` / `wheel_spin` | −2e-5 / −1e-6 / −3e-5 | L2 | 平滑、抑制抖动与空转 |
 | `closure_residual` | −1000 | L2 | 五连杆闭环必须闭合 |
 
 ### 三个关键设计决定
@@ -1126,15 +1186,88 @@ leg_rates = (dL0_l, dφ_l, dL0_r, dφ_r)
 
 ---
 
+## 7.11 PhysX GPU 崩溃：症状、原因、恢复
+
+### 症状
+
+```
+RuntimeError: CUDA error: an illegal memory access was encountered
+RuntimeError: CUDA error: an illegal instruction was encountered
+```
+
+后面跟着：
+
+```
+[omni.physx.fabric.plugin] CUDA error: ... DirectGpuHelper.cpp: 563-587
+[omni.physx.plugin] PhysX warning: PxgCudaMemoryAllocator.cpp, LINE 68
+Windows fatal exception: access violation
+```
+
+### 真正的原因：不是我们的代码
+
+CUDA 是**异步**的。PhysX 在 GPU 上非法访问后，CUDA context 就报废了，
+**下一个碰 GPU 的 Python 代码**才会抛出异常 —— 所以 traceback 指向哪一行（膝角求解器、
+`ppo.py` 的 `value_loss.item()`、`env.step()`）都是**假线索**，只是"报错点"。
+
+真正的出错点永远是 `PxgCudaMemoryAllocator` / `DirectGpuHelper`。
+崩溃时显存（FB）通常只用 1 GB / 8 GB，**不是显存不够**。
+
+### 历史存活时间（同样的崩溃模式）
+
+| 配置 | 存活 | 每轮耗时 |
+|---|---|---|
+| 4096 环境 | ~5 分钟 | 2.7 s |
+| 2048 环境 | ~24 分钟 | — |
+| 1024 环境，网络 256-256-128，patch 缓冲翻倍 | **2.9 分钟** | 2.4 s |
+| 1024 环境，网络 128-128-64，patch 缓冲默认，重启后 | **16.2 分钟** | 1.94 s |
+
+> 同一次开机内多次崩溃后，存活时间会**持续缩短**（实测 9 → 3.1 → 2.9 分钟）。
+> 这提示 GPU/驱动状态在被反复污染，**重启电脑能恢复到最长存活时间**。
+
+### 已做的缓解（按有效性排序）
+
+| 措施 | 效果 |
+|---|---|
+| **重启电脑** | 最重要。清掉驱动被污染的累积状态 |
+| **网络 256-256-128 → 128-128-64** | 单轮 2.4 → 1.94 s，GPU 压力显著下降 |
+| **`gpu_max_rigid_patch_count` 回到默认 `5*2**15`** | 之前被设成默认 2 倍，纯属多占内存 |
+| **`save_interval = 50`** | 崩溃最多丢 2 分钟，配合 `--resume` 效率约 90% |
+| **NaN 防护**（`process_actions` / `update_knee_targets` / `update_leg_rates`） | NaN 绝不进入 PhysX 关节目标 |
+
+### 还能试的（按顺序）
+
+```cmd
+:: 1) 关掉 fabric 插件（就是报错的那个模块），代价约 4% 速度
+set INFANTRY_RL_USE_FABRIC=0
+
+:: 2) 降低速度范围，减少冲击负载
+set INFANTRY_RL_VX_MIN=0.1
+set INFANTRY_RL_VX_MAX=0.8
+
+:: 3) 降低环境数（512 未验证过，2~256 会卡死）
+--num_envs 768
+```
+
+### 崩溃后的恢复（标准动作）
+
+```cmd
+cd /d D:\Robomaster\RL
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\train.py --task Infantry-RL-Locomotion-v0 --headless --num_envs 1024 --max_iterations <剩余轮数> --no_code_state --resume --resume_latest
+```
+
+**判断是否该重启电脑**：如果这次只撑了上次的一半甚至更短，说明驱动状态在劣化，就该重启。
+
+---
+
 ## 8. 相关脚本
 
 | 脚本 | 用途 |
 |---|---|
 | `scripts\train.py` | 训练入口 |
 | `scripts\play.py` | 回放/评估 |
-| `scripts\smoke_test.py` | 闭环 + 站立验证（不开训练也能跑） |
+| `scripts\check_robot.py` | 闭环 + 站立验证（不开训练也能跑） |
 | `scripts\diag_clone.py` | 诊断多环境卡死 |
 | `scripts\build_proxy_asset.py` | 生成轻量代理资产 |
-| `isaac_ws_infantry\kinematics\test_leg_model.py` | 运动学验证（秒级，不需要 GPU） |
+| `isaac_ws_infantry\kinematics\check_planar_leg.py` | 运动学验证（秒级，不需要 GPU） |
 
 完整背景见 [`VERIFIED_RESULTS.md`](VERIFIED_RESULTS.md) 与 [`DESIGN.md`](DESIGN.md)。

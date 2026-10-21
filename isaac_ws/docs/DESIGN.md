@@ -96,7 +96,7 @@ has_calf_axle_joint = False
 > 复现方法：URDF 导入器保留了 loop joint，但把它加载成 articulation 后
 > `num_joints` 只有 10、`has_calf_axle_joint` 为 False，且后小腿会自由摆动。
 > 复现脚本 `scripts\diag_clone.py` 会打印 articulation 的关节清单；
-> 最快的自检是 `scripts\smoke_test.py` —— 它从仿真刚体姿态独立测量闭环残差，
+> 最快的自检是 `scripts\check_robot.py` —— 它从仿真刚体姿态独立测量闭环残差，
 > 若残差为 0.27 m 左右（而非 0）就说明环是开的。
 
 ---
@@ -134,7 +134,7 @@ X = K    + R(s_hip · q_hip + s_knee · q_knee) · Q
 | `s_knee` | +1 | +1 |
 | 模型对精确 FK 的残差 | **1.7e-16 m** | 4.5e-7 m（URDF float32 噪声） |
 
-复现：`python isaac_ws/isaac_ws_infantry/kinematics/test_leg_model.py`
+复现：`python isaac_ws/isaac_ws_infantry/kinematics/check_planar_leg.py`
 → 3000 组随机关节角下，模型与精确 FK 的最大误差 1.8e-16 m（左）/ 4.6e-7 m（右），
 零位闭环残差 2.8e-17 m。
 
@@ -145,7 +145,7 @@ X = K    + R(s_hip · q_hip + s_knee · q_knee) · Q
 - **主动关节**：每腿 2 个髋（共 4 个）+ 2 个轮（速度控制）→ 与实车一致。
 - **被动关节**：每腿 2 个膝，每控制步用 `solve_loop` 解出并写进位置目标（热启动）。
 
-### 4.1 可达工作空间（实测，`feasible_workspace.py`）
+### 4.1 可达工作空间（实测，`tools/analyze_workspace.py`）
 
 14641 组髋角里只有 **6281 组**能既闭合闭环又让两个膝角落在限位内：
 
@@ -190,7 +190,7 @@ front_knee = +0.606460 rad      back_knee  = -0.606438 rad
 
 ```powershell
 $py = "D:\miniconda\envs\RM\python.exe"
-& $py isaac_ws\scripts\smoke_test.py --headless          # 先验证闭环与站立
+& $py isaac_ws\scripts\check_robot.py --headless          # 先验证闭环与站立
 & $py isaac_ws\scripts\train.py --task Infantry-RL-Balance-v0 --headless --num_envs 4096
 & $py isaac_ws\scripts\play.py  --task Infantry-RL-Balance-Play-v0
 ```
@@ -241,16 +241,16 @@ cd D:\Robomaster\RL
 
 & $py isaac_ws\scripts\prepare_asset.py                       # 生成可移植资产包（相对 mesh 路径）
 & $py isaac_ws\scripts\extract_joint_map.py                   # 关节表 + 轴 + 限位
-& $py -B isaac_ws\isaac_ws_infantry\kinematics\test_leg_model.py     # 运动学与闭环求解器验证
-& $py -B isaac_ws\isaac_ws_infantry\kinematics\feasible_workspace.py # 可达工作空间
-& $py isaac_ws\scripts\smoke_test.py --headless --num_envs 1 --steps 200   # 闭环 + 站立（需 GPU）
+& $py -B isaac_ws\isaac_ws_infantry\kinematics\check_planar_leg.py     # 运动学与闭环求解器验证
+& $py -B isaac_ws\isaac_ws_infantry\kinematics\tools/analyze_workspace.py # 可达工作空间
+& $py isaac_ws\scripts\check_robot.py --headless --num_envs 1 --steps 200   # 闭环 + 站立（需 GPU）
 & $py isaac_ws\scripts\diag_clone.py --num_envs 2 --steps 3 --headless     # 复现多环境卡死
 ```
 
 > 生成可移植资产包的脚本还会顺手产出 `assets/infantry-rl/infantry_rl.usd`，
 > 即"URDF 导入器保留 loop joint（12 个）"那条结论的产物；
 > 而"加载成 articulation 只剩 10 个 DOF"由 `diag_clone.py` 打印的关节清单与
-> `smoke_test.py` 测出的闭环残差共同佐证。
+> `check_robot.py` 测出的闭环残差共同佐证。
 >
 > 这些结论当初是用一组一次性探针脚本测出来的，脚本本身已在交付前清理，
 > 上面给出的都是保留下来的、可反复运行的等价命令。
@@ -266,4 +266,4 @@ cd D:\Robomaster\RL
   底盘碰撞体是它的凸包（PhysX 已成功 cook，实测机器人能稳定落地）。
   如果发现接触不稳定，建议把底盘换成几个盒体代理碰撞（可以显著提速并更稳定）。
 - 五连杆的闭环是**用 PD 驱动被动关节**来近似的，不是硬约束。刚度不足时高速运动下
-  会有几毫米的形变；`smoke_test.py` 会打印实测残差供你判断。
+  会有几毫米的形变；`check_robot.py` 会打印实测残差供你判断。

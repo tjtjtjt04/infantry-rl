@@ -1,7 +1,7 @@
 """Observation terms for the infantry-rl balance task.
 
 Everything is expressed in the action-vector order defined in
-:mod:`isaac_ws_infantry.model`, so the policy sees the same layout it commands.
+:mod:`isaac_ws_infantry.robot_model`, so the policy sees the same layout it commands.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import isaaclab.utils.math as math_utils
 from isaaclab.assets import Articulation
 from isaaclab.managers import SceneEntityCfg
 
-from ..model import HIP_ORDER, KNEE_ORDER, WHEEL_ORDER
+from ..robot_model import HIP_ORDER, KNEE_ORDER, WHEEL_ORDER
 
 
 def _action_term(env, action_name: str):

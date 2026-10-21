@@ -95,6 +95,65 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import isaac_ws_infantry  # noqa: F401  (registers the Infantry-RL gym tasks)
 
 
+def _hidden_dims_from_state_dict(state_dict: dict) -> list[int]:
+    """Recover ``[h1, h2, ...]`` from the ``mlp.<i>.weight`` entries of a model state dict.
+
+    rsl_rl stores the MLP as ``Linear -> ELU -> Linear -> ... -> Linear``, so the linear
+    layers live at even indices; the hidden widths are the ``out_features`` of every
+    layer except the output one.  Returns ``[]`` when the layout is not recognised.
+    """
+    widths: dict[int, int] = {}
+    for key, value in state_dict.items():
+        if not key.startswith("mlp.") or not key.endswith(".weight"):
+            continue
+        parts = key.split(".")
+        if len(parts) != 3:
+            continue
+        try:
+            index = int(parts[1])
+        except ValueError:
+            continue
+        widths[index] = int(value.shape[0])
+    ordered = [widths[i] for i in sorted(widths)]
+    return ordered[:-1] if len(ordered) > 1 else []
+
+
+def _infer_network_shape(checkpoint_path: str, agent_cfg) -> None:
+    """Patch ``agent_cfg`` so the model built at load time matches the checkpoint.
+
+    ``InfantryLocomotionPPORunnerCfg_PLAY`` inherits ``hidden_dims`` from the training
+    config, so changing the architecture makes every checkpoint written *before* that
+    change unloadable (``size mismatch for mlp.0.weight``).  The layer widths are fully
+    recoverable from the state dict, so read them back instead of trusting the config.
+
+    Only the observation *layout* is a genuine incompatibility -- that one is defined by
+    the environment and cannot be patched here, so it is reported and left to raise a
+    clear error at load time.
+    """
+    try:
+        ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    except Exception as exc:  # noqa: BLE001 - playback must not die on an inspection
+        print(f"[play] WARNING: could not inspect checkpoint ({exc}); using config shapes")
+        return
+
+    for name in ("actor", "critic"):
+        state_dict = ckpt.get(f"{name}_state_dict")
+        if not isinstance(state_dict, dict):
+            continue
+        dims = _hidden_dims_from_state_dict(state_dict)
+        if not dims:
+            continue
+        current = list(getattr(agent_cfg, name).hidden_dims or [])
+        if current != dims:
+            print(f"[play] {name} hidden_dims: config {current} -> checkpoint {dims} (using checkpoint)")
+            getattr(agent_cfg, name).hidden_dims = dims
+
+    actor_sd = ckpt.get("actor_state_dict") or {}
+    first_weight = actor_sd.get("mlp.0.weight")
+    if first_weight is not None:
+        print(f"[play] checkpoint observation dim = {int(first_weight.shape[1])}")
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg, agent_cfg: RslRlBaseRunnerCfg):
     """Play with RSL-RL agent."""
@@ -149,6 +208,17 @@ def main(env_cfg, agent_cfg: RslRlBaseRunnerCfg):
         )
     print(f"[INFO] Loading model checkpoint from: {resume_path}")
 
+    # ------------------------------------------------------------------ #
+    # Match the network shape to the CHECKPOINT, not to the current config.
+    #
+    # The PLAY config inherits hidden_dims from the training config, so the moment the
+    # training architecture is changed every checkpoint written before that change
+    # becomes unloadable ("size mismatch for mlp.0.weight").  The architecture is
+    # fully recoverable from the state dict, so read it back and patch the config.
+    # Only the observation LAYOUT is a genuine incompatibility (the env defines it).
+    # ------------------------------------------------------------------ #
+    _infer_network_shape(resume_path, agent_cfg)
+
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 
     if args_cli.video:
@@ -181,6 +251,7 @@ def main(env_cfg, agent_cfg: RslRlBaseRunnerCfg):
     l0_spans = []
     dphis = []
     dl0s = []
+    axle_skew = []
     xs = []
     ys = []
     vxs = []
@@ -283,6 +354,11 @@ def main(env_cfg, agent_cfg: RslRlBaseRunnerCfg):
         l0_spans.append(_l0)
         dphis.append(_dphi)
         dl0s.append(_dl0)
+        # |L0_l*sin(phi_l) - L0_r*sin(phi_r)|: how far the two wheel contact points are
+        # out of line fore-aft.  Should be ~0 when the axle is straight.
+        _st = _joints.solved_leg_state()[0]
+        axle_skew.append(abs(float(_st[0]) * math.sin(float(_st[1]))
+                             - float(_st[2]) * math.sin(float(_st[3]))))
         _x, _y = _xy()
         xs.append(_x)
         ys.append(_y)
@@ -340,6 +416,8 @@ def main(env_cfg, agent_cfg: RslRlBaseRunnerCfg):
     mean_dphi = sum(dphis) / max(1, len(dphis))
     max_dphi = max(dphis) if dphis else 0.0
     mean_dl0 = sum(dl0s) / max(1, len(dl0s))
+    mean_axle = 1000.0 * sum(axle_skew) / max(1, len(axle_skew))
+    max_axle = 1000.0 * (max(axle_skew) if axle_skew else 0.0)
 
     print(
         f"[play] steps={steps}  base_z mean={sum(heights) / len(heights):.4f} m  "
@@ -353,6 +431,7 @@ def main(env_cfg, agent_cfg: RslRlBaseRunnerCfg):
         f"mean |dphi|={mean_dphi:.2f} rad/s (max {max_dphi:.2f})\n"
         f"[play] stance: mean |dL0|={mean_dl0:.3f} m/s  "
         f"mean |L0_left - L0_right|={mean_l0_span:.2f} mm\n"
+        f"[play] axle: mean |wheel fore-aft skew|={mean_axle:.1f} mm (max {max_axle:.1f})\n"
         f"[play] position: net displacement=({xs[-1] - xs[0]:+.3f}, {ys[-1] - ys[0]:+.3f}) m  "
         f"max |x|={max(abs(v - xs[0]) for v in xs):.3f} m  "
         f"mean |vx|={sum(abs(v) for v in vxs) / max(1, len(vxs)):.3f} m/s"

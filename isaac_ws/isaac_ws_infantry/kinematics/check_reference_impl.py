@@ -3,7 +3,7 @@
 Every check compares against the EXACT 3-D URDF forward kinematics, so a pass means
 the planar reduction is faithful.
 
-Run:  python isaac_ws/isaac_ws_infantry/kinematics/test_five_bar.py
+Run:  python isaac_ws/isaac_ws_infantry/kinematics/check_reference_impl.py
 """
 
 from __future__ import annotations
@@ -19,13 +19,13 @@ WS = HERE.parent.parent  # isaac_ws
 URDF = WS / "assets" / "infantry-rl" / "urdf" / "infantry-rl-sim.urdf"
 sys.path.insert(0, str(HERE))
 
-from five_bar import (  # noqa: E402
+from reference_impl import (  # noqa: E402
     PlanarLeg,
-    UrdfTree,
     leg_state_np,
     neutral_pose_np,
     solve_loop_np,
 )
+from urdf_tree import UrdfTree  # noqa: E402
 
 FAILURES: list[str] = []
 N_RANDOM = 3000

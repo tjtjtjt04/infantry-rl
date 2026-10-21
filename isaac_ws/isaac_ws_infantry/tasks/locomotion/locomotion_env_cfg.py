@@ -33,6 +33,8 @@ in-place rotation (``vx = 0, heading_target moving``) and turning while driving
 
 from __future__ import annotations
 
+import os
+
 import isaaclab.envs.mdp as base_mdp
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.envs.mdp.commands.commands_cfg import UniformVelocityCommandCfg
@@ -40,29 +42,72 @@ from isaaclab.managers import CommandTermCfg
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
-from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.utils import configclass
 
 import isaac_ws_infantry.mdp as mdp
 from isaac_ws_infantry.robots import INFANTRY_RL_CFG
-from isaac_ws_infantry.tasks.balance.balance_env_cfg import (
+from isaac_ws_infantry.tasks.common.robot_env_cfg import (
     FALL_ANGLE,
     FALL_HEIGHT,
     NOMINAL_HEIGHT,
     ActionsCfg,
-    BalanceSceneCfg,
+    RobotSceneCfg,
     TerminationsCfg,
 )
 
-#: forward/backward speed range the policy is trained on (m/s)
-LIN_VEL_X_RANGE = (-0.5, 0.5)
-#: yaw-rate range -- also the clamp on the heading controller output (rad/s).
-#: 2.5 rad/s is ~143 deg/s, fast enough for a crisp in-place turn; the previous 1.5
-#: made the robot feel sluggish.
+# Forward speed range the policy is trained on (m/s).  Both bounds are configurable so
+# the envelope can be staged without touching code.
+#
+# v1.0.6: default is [0.2, 1.2] -- a FORWARD-ONLY band, as requested.  Consequences to be
+# aware of:
+#   * the robot never sees a reverse command, so it will not learn to back up;
+#   * it never sees a near-zero *moving* command either -- stopping is still trained,
+#     because `rel_standing_envs = 0.1` zeroes the whole command for 10% of the envs
+#     (that is the braking sample).
+# To get reverse back, set INFANTRY_RL_VX_MIN to a negative number.
+#
+# What the hardware can actually do:
+#   wheel velocity limit 61.471 rad/s x 0.068 m      -> 4.18 m/s
+#   wheel effort 2 x 3.69 Nm / 0.068 m = 108 N       -> 8.5 m/s^2 of thrust
+#   total mass 12.776 kg, so ~8.5 m/s^2 available vs the ~7.8 m/s^2 a tyre can grip
+# 1.2 m/s therefore sits at only ~29% of the wheel limit (17.6 rad/s), which leaves a
+# large margin for slip, slope and the 3.69 Nm effort cap.
+VX_MIN_MPS = float(os.environ.get("INFANTRY_RL_VX_MIN", "0.2"))
+VX_MAX_MPS = float(os.environ.get("INFANTRY_RL_VX_MAX", "1.2"))
+
+#: forward speed range the policy is trained on (m/s)
+LIN_VEL_X_RANGE = (VX_MIN_MPS, VX_MAX_MPS)
+
+#: TRAIN TURNING OR NOT.
+#:
+#: Off (default) is the "straight line only" task: the heading target is pinned to 0, so
+#: the robot is never asked to turn to a new direction.  It still *holds* its heading,
+#: because the heading controller keeps running --
+#:
+#:     wz* = clip(1.5 * wrap(0 - psi), +/-2.5)
+#:
+#: i.e. any yaw drift still produces a correcting command, which is exactly what was
+#: asked for ("going forward must not accumulate a heading offset / yaw rate").
+#:
+#: Turning it back on restores random heading targets in [-pi, pi].  Doing so is a
+#: ONE-LINE switch rather than a code change, because the difference is entirely in the
+#: command sampling range -- no observation, reward or network change is involved.
+_ENABLE_TURNING = os.environ.get("INFANTRY_RL_ENABLE_TURNING", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+#: heading target sampling range.  Fixed at 0 unless INFANTRY_RL_ENABLE_TURNING=1.
+HEADING_RANGE = (-3.141592653589793, 3.141592653589793) if _ENABLE_TURNING else (0.0, 0.0)
+
+#: yaw-rate range -- also the CLAMP on the heading controller output (rad/s).
+#: It is NOT a sampling range when heading_command=True.  Kept at +/-2.5 even with
+#: turning disabled: it sets how hard the robot may correct a heading drift.
 ANG_VEL_Z_RANGE = (-2.5, 2.5)
 #: how strongly a heading error is turned into a yaw-rate command (1/s). 1.5 means a
-#: 1 rad heading error immediately asks for the maximum trained yaw rate.
+#: 1 rad heading error immediately asks for the maximum correction rate.
 HEADING_STIFFNESS = 1.5
 #: fraction of environments commanded to stand still (teaches braking)
 REL_STANDING_ENVS = 0.1
@@ -86,7 +131,7 @@ class LocomotionCommandsCfg:
             lin_vel_x=LIN_VEL_X_RANGE,
             lin_vel_y=(0.0, 0.0),  # not actuated on a differential drive
             ang_vel_z=ANG_VEL_Z_RANGE,
-            heading=(-3.14, 3.14),
+            heading=HEADING_RANGE,
         ),
     )
 
@@ -183,7 +228,7 @@ class LocomotionRewardsCfg:
         func=mdp.base_height_abs, weight=-4.0, params={"target_height": NOMINAL_HEIGHT}
     )
     # pitch stays the strict quantity: this is what the legs are supposed to regulate.
-    pitch = RewTerm(func=mdp.pitch_abs, weight=-4.0)
+    pitch = RewTerm(func=mdp.pitch_abs, weight=-.0)
 
     # -- walk upright, but bank freely while cornering --------------------
     # The previous -0.3 "token" weight was what let the policy settle into a permanent
@@ -201,19 +246,108 @@ class LocomotionRewardsCfg:
     lin_vel_z = RewTerm(func=mdp.lin_vel_z_l2, weight=-2.0)
 
     # -- tracking the command --------------------------------------------
-    # Rotation is weighted slightly above translation so in-place turns are crisp.
+    # WEIGHT REBALANCE (v1.0.2).  This used to be lin 2.0 / yaw 2.5, and that asymmetry
+    # produced a "stand still and rotate" local optimum that 2000 iterations could not
+    # escape -- measured on the 2026-10-21 run:
+    #
+    #     track_ang_vel_z  2.2185 / 2.5  = 89% of its ceiling
+    #     track_lin_vel_x  0.3959 / 2.0  = 20%
+    #     Policy/mean_std  0.497 -> 0.067  (exploration collapsed)
+    #
+    # Why a stationary robot scores so well on the YAW term: `wz*` is produced by the
+    # heading controller and decays to 0 once the target heading is reached; a robot that
+    # does not move has `wz = 0`, so `exp(0) = 1` -- it collects the full 2.5 for free,
+    # without ever translating.  Standing still therefore paid ~0.5 + 2.5 + 0.47 = 2.7
+    # against ~4.5 for actually walking, i.e. 60% of the score with none of the risk.
+    #
+    # After the rebalance the gap is ~3.06 per step instead of ~1.8, and translation --
+    # the actual goal -- is the dominant term.
+    # v1.0.7 REBALANCE (measured on the 2026-10-22 00:00 run, 650 iterations):
+    #   error_vel_xy      = 1.204 m/s   (the command mean is only 0.7 m/s!)
+    #   track_lin_vel_x   = 0.620 / 4.0 = 15.5%
+    #   track_ang_vel_z   = 1.359 / 1.5 = 91%   <- free while standing still
+    #   mean_episode_length = 1000 (never falls), mean_std = 0.031 (exploration dead)
+    # i.e. the policy settled on "stand still and be safe".  Two causes:
+    #
+    #  (a) standing still still PAID: 0.5 alive + 1.5 yaw + 0.23 exp - 0.57 L2 = +1.66/step;
+    #  (b) the exp kernel is dead at large errors: with cmd 1.2 and v 0,
+    #      exp(-(1.2)^2/0.25^2) = exp(-23) ~ 0, so it supplies NO gradient to start moving.
+    #
+    # The fix raises the cost of being at the wrong speed (exp +6.0, L2 -3.0 -- the L2
+    # gradient -2*3*e grows with the error, so it still pulls when the exp is saturated)
+    # and lowers the free yaw reward (1.5 -> 1.0).  Standing still now pays ~+0.12/step
+    # against ~7.5 for walking, instead of +1.66 vs 6.0.
+    # v1.0.8 PRECISION: target is `Metrics/base_velocity/error_vel_xy` and `..._yaw`
+    # below 0.05.  NOTE the scale of that metric: the command term accumulates
+    # `error / (resampling_time_max/step_dt) = error/500` every step and only zeroes it at
+    # the EPISODE reset, so over a 1000-step episode the logged number is
+    # `sum(error)/500 = 2 * mean_error`.  A logged 0.05 therefore means a true mean error
+    # of 0.025 m/s.  Getting there needs three things, hence the changes below:
+    #   (a) a reward that still discriminates at a few cm/s -> narrower exp kernel;
+    #   (b) a term that keeps pulling at cm/s errors -> the L1 terms (constant gradient);
+    #   (c) less friction on the fast corrections -> relaxed action_jerk / wheel_torques.
     track_lin_vel_x = RewTerm(
-        func=mdp.track_lin_vel_x_exp, weight=2.0, params={"command_name": "base_velocity", "std": 0.25}
+        func=mdp.track_lin_vel_x_exp, weight=8.0, params={"command_name": "base_velocity", "std": 0.15}
     )
     track_ang_vel_z = RewTerm(
-        func=mdp.track_ang_vel_z_exp, weight=2.5, params={"command_name": "base_velocity", "std": 0.35}
+        func=mdp.track_ang_vel_z_exp, weight=3.0, params={"command_name": "base_velocity", "std": 0.15}
     )
     # reaching the commanded heading, not merely matching the yaw rate
     heading_error = RewTerm(
-        func=mdp.heading_error_l2, weight=-0.4, params={"command_name": "base_velocity"}
+        func=mdp.heading_error_l2, weight=-0.6, params={"command_name": "base_velocity"}
     )
+
+    # -- steady-state stiffness the exp kernels cannot provide ------------
+    # `exp(-e^2/std^2)` has ZERO gradient at e = 0, so small deviations oscillating at
+    # the control rate are almost free: the policy is pushed to "roughly the commanded
+    # speed" but not to a *steady* one.  Measured symptom: the robot advances in bursts
+    # ("move, stop, move") and keeps a visible yaw wobble, because a two-wheel robot is
+    # continuously making small steering corrections and nothing charged for them.
+    #
+    #   * L2 (gradient -2*w*e) grows with the error -> it is what breaks the "stand still"
+    #     optimum and cleans up large errors (v1.0.7: -3.0);
+    #   * L1 (gradient -w, CONSTANT) is the one that fixes the last few cm/s: at e = 0.02
+    #     the L2 gradient is only 2*6*0.02 = 0.24, while L1 still pulls with its full 2.0.
+    #     Without L1 the policy has no reason to go from 10 cm/s to 2 cm/s (v1.0.8).
+    track_lin_vel_x_l1 = RewTerm(
+        func=mdp.track_lin_vel_x_l1, weight=-2.0, params={"command_name": "base_velocity"}
+    )
+    track_ang_vel_z_l1 = RewTerm(
+        func=mdp.track_ang_vel_z_l1, weight=-1.0, params={"command_name": "base_velocity"}
+    )
+    track_lin_vel_x_l2 = RewTerm(
+        func=mdp.track_lin_vel_x_l2, weight=-6.0, params={"command_name": "base_velocity"}
+    )
+    track_ang_vel_z_l2 = RewTerm(
+        func=mdp.track_ang_vel_z_l2, weight=-2.0, params={"command_name": "base_velocity"}
+    )
+
     # no lateral actuator -> skidding sideways is never the right answer
     lin_vel_y = RewTerm(func=mdp.lin_vel_y_l2, weight=-0.5)
+
+    # -- keep the two wheels on a common axle ----------------------------
+    # `phi` is measured per leg and NOTHING tied the left and right values together, so
+    # the policy learned to lean one leg forward and the other one back and use that as
+    # an extra yaw actuator.  The physical result is a SKEWED axle: the two wheels no
+    # longer sit at the same fore-aft position, so the robot drives with one wheel ahead
+    # of the other and scrubs sideways instead of going straight.
+    #
+    # The term is |L0_l*sin(phi_l) - L0_r*sin(phi_r)| in metres -- literally "how many
+    # millimetres are the wheels out of line" -- and it is L1 so it pulls with a constant
+    # force at any offset.
+    #
+    # Deliberately NOT penalised: the COMMON part of phi.  Both legs leaning together is
+    # the inverted-pendulum CG shift that produces forward acceleration, so it must stay
+    # free.  Only the left-right difference is constrained, which is also what the
+    # reference firmware does (its VMC + LQR drives both leg angles to the same
+    # reference).
+    #
+    # Scale check: 3 deg of asymmetry per leg at L0 = 0.25 m gives 26 mm of skew, and
+    # 26 mm * 8 = 0.21 per step against an alive bonus of 0.5 -- a clear signal without
+    # dominating the tracking terms.
+    wheel_axle = RewTerm(
+        func=mdp.leg_axle_skew_abs, weight=-8.0, params={"action_name": "joints"}
+    )
 
     # -- make the LEGS the balancing actuator ----------------------------
     # Pitch is controllable by two redundant actuators on this robot:
@@ -230,25 +364,48 @@ class LocomotionRewardsCfg:
     # hips.  Inverted-pendulum locomotion by leaning needs almost no wheel torque
     # (the wheels only have to roll under the body), while wheel-torque balancing
     # spikes into the 1-3 Nm range.  This term is what flips the trade-off.
+    #
+    # It uses a DEADBAND at 1.0 Nm rather than a plain L2: the wheels are also the only
+    # longitudinal actuator, and with the speed range now up to 2 m/s a plain sum(tau^2)
+    # would charge normal acceleration (~0.9 Nm per wheel) and command steps (~1.7 Nm).
+    # Only the attitude-correction spikes are penalised -- see mdp.rewards.
     wheel_torques = RewTerm(
-        func=base_mdp.joint_torques_l2,
+        func=mdp.wheel_torques_excess_l2,
         weight=-5.0e-2,
-        params={
-            "asset_cfg": SceneEntityCfg(
-                "robot", joint_names=["left_wheel", "right_wheel"], preserve_order=True
-            )
-        },
+        # v1.0.8: dead band 1.0 -> 1.5 N*m.  The maximum wheel torque is 3.69 N*m, so a
+        # 1.0 dead band left only 2.7 N*m of free authority and charged for every
+        # acceleration burst -- exactly what tight velocity tracking needs.  The term
+        # still keeps the wheels from becoming the balance actuator (the reason it exists).
+        params={"threshold": 1.5, "action_name": "joints"},
     )
 
     # -- smooth actuation ------------------------------------------------
     # action_rate is relaxed (was -1e-2): the legs must be allowed to move FAST to
     # track pitch/roll, otherwise the penalty alone keeps them stiff.
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-4.0e-3)
+    # NEW in v1.0.5: penalise the SECOND difference of the action, not the first.
+    #
+    # The legs still tremble a little after the reward/dynamics fixes.  Raising
+    # `action_rate` cannot fix that -- it charges every change, including the fast leg
+    # motion that keeps the body upright -- so the tremor needs a term that is blind to
+    # smooth motion.  For a constant / ramp / accelerating trajectory
+    #     a[t] - 2a[t-1] + a[t-2]
+    # is ~0, while for a step-alternating (dithering) action it is 4x the amplitude.
+    #
+    # Scale: a tremor of +/-0.05 in every action dim gives sum(jerk^2) ~ 0.24, so -0.5
+    # charges 0.12 per step against an alive bonus of 0.5 -- clearly worth removing,
+    # while a smooth leg swing is essentially free.
+    action_jerk = RewTerm(func=mdp.action_jerk_l2, weight=-0.3, params={"action_name": "joints"})
     # joint_torques covers the hips too, so keep it light (was -1e-4) -- penalising
     # hip torque directly fights the behaviour we want.
     joint_torques = RewTerm(func=mdp.joint_torques_l2, weight=-2.0e-5)
-    joint_acc = RewTerm(func=mdp.joint_acc_l2, weight=-1.0e-7)
-    wheel_spin = RewTerm(func=mdp.wheel_spin_l2, weight=-1.0e-4, params={"action_name": "joints"})
+    # was -1e-7 (effectively zero).  Joint acceleration is the most direct measure of the
+    # tremor, so give it a real weight; 1e-6 still stays well below the tracking terms.
+    joint_acc = RewTerm(func=mdp.joint_acc_l2, weight=-1.0e-6)
+    # weight lowered from -1e-4: at 2 m/s the wheels legitimately spin at 29 rad/s, so a
+    # plain sum(w^2) costs 0.17 per step -- a 3.4% drag that biases the policy against
+    # actually using the top of the speed range.
+    wheel_spin = RewTerm(func=mdp.wheel_spin_l2, weight=-3.0e-5, params={"action_name": "joints"})
 
     # -- the closed loop must stay closed --------------------------------
     closure_residual = RewTerm(
@@ -262,7 +419,7 @@ class LocomotionEnvCfg(ManagerBasedRLEnvCfg):
 
     #: 1024 is the largest environment count this machine can run without running the
     #: 8 GB GPU (and PhysX' fabric path) out of memory; ``--num_envs`` overrides it.
-    scene: BalanceSceneCfg = BalanceSceneCfg(num_envs=1024, env_spacing=2.5)
+    scene: RobotSceneCfg = RobotSceneCfg(num_envs=1024, env_spacing=2.5)
     observations: LocomotionObservationsCfg = LocomotionObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     rewards: LocomotionRewardsCfg = LocomotionRewardsCfg()
@@ -280,7 +437,11 @@ class LocomotionEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.dt = 0.005
         self.sim.render_interval = self.decimation
         self.sim.physics_material = self.scene.terrain.physics_material
-        self.sim.physx.gpu_max_rigid_patch_count = 10 * 2**15
+        # Isaac Lab's default is 5 * 2**15; this scene only has a flat ground plane and
+        # 1024 small robots (~11 links each), so the doubled buffer bought nothing and
+        # only added GPU memory pressure -- the exact resource whose exhaustion shows up
+        # as "CUDA error: an illegal memory access" inside the PhysX GPU allocator.
+        self.sim.physx.gpu_max_rigid_patch_count = 5 * 2**15
 
         import os as _os
 
@@ -306,6 +467,27 @@ class LocomotionEnvCfg(ManagerBasedRLEnvCfg):
                 print(f"[cfg] PhysX position iters: {int(_iters)} (INFANTRY_RL_PHYSX_POS_ITERS)")
             except ValueError:
                 pass
+
+        # command envelope: printed every run so it is obvious what the policy was
+        # actually trained (or evaluated) on -- a play command outside this range is
+        # out of distribution, not a policy failure
+        print(
+            f"[cfg] command ranges      : vx [{VX_MIN_MPS:+.2f}, {VX_MAX_MPS:+.2f}] m/s "
+            f"(INFANTRY_RL_VX_MIN / INFANTRY_RL_VX_MAX), "
+            f"standing envs {REL_STANDING_ENVS:.0%}, "
+            f"wz clamp +/-{ANG_VEL_Z_RANGE[1]:.2f} rad/s, "
+            f"heading stiffness {HEADING_STIFFNESS:.2f}"
+        )
+        if _ENABLE_TURNING:
+            print(
+                "[cfg] turning             : ENABLED (INFANTRY_RL_ENABLE_TURNING=1) -- "
+                "heading targets sampled in [-pi, pi]"
+            )
+        else:
+            print(
+                "[cfg] turning             : DISABLED -- heading TARGET pinned to 0, the "
+                "heading loop still cancels yaw drift (straight-line task)"
+            )
 
         # viewer (only used in non-headless play)
         self.viewer.eye = (2.0, -2.0, 1.0)
@@ -338,7 +520,7 @@ __all__ = [
     "LocomotionObservationsCfg",
     "LocomotionRewardsCfg",
     "ActionsCfg",
-    "BalanceSceneCfg",
+    "RobotSceneCfg",
     "TerminationsCfg",
     "FALL_ANGLE",
     "FALL_HEIGHT",

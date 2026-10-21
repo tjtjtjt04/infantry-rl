@@ -1,5 +1,3 @@
-"""Task registrations (gym environments) of the infantry-rl project."""
+"""Task registrations (importing these registers the gym environments)."""
 
-from . import balance, locomotion  # noqa: F401
-
-__all__ = ["balance", "locomotion"]
+from . import common, balance, locomotion  # noqa: F401

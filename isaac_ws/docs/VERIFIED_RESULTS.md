@@ -10,7 +10,7 @@ Python `D:\miniconda\envs\RM\python.exe`，GPU RTX 4060 Laptop 8 GB。
 
 ## ✅ 1. 运动学：已验证到机器精度
 
-`isaac_ws/isaac_ws_infantry/kinematics/test_leg_model.py` → **exit 0，全部通过**
+`isaac_ws/isaac_ws_infantry/kinematics/check_planar_leg.py` → **exit 0，全部通过**
 
 | 检查 | 结果 |
 |---|---|
@@ -28,8 +28,8 @@ Python `D:\miniconda\envs\RM\python.exe`，GPU RTX 4060 Laptop 8 GB。
 
 ## ✅ 2. 闭环控制策略：在真实物理仿真里验证通过
 
-`isaac_ws/scripts/smoke_test.py --headless --num_envs 1 --steps 200`
-→ **RESULT: PASS**（报告写到 `scripts/smoke_test_report.json`；
+`isaac_ws/scripts/check_robot.py --headless --num_envs 1 --steps 200`
+→ **RESULT: PASS**（报告写到 `scripts/check_robot_report.json`；
 它属于运行产物，已随训练痕迹一同清理，重跑该命令即可再生成）
 
 | 指标 | 实测 | 容差 |
@@ -55,8 +55,8 @@ Python `D:\miniconda\envs\RM\python.exe`，GPU RTX 4060 Laptop 8 GB。
 
 | 场景 | 结果 |
 |---|---|
-| `smoke_test.py --num_envs 1`（完整 CAD 资产） | ✅ 通过，200 步正常 |
-| `smoke_test.py --num_envs 4` | ❌ **卡死**在 `gym.make()` 里 |
+| `check_robot.py --num_envs 1`（完整 CAD 资产） | ✅ 通过，200 步正常 |
+| `check_robot.py --num_envs 4` | ❌ **卡死**在 `gym.make()` 里 |
 | `train.py --num_envs 64 / 4 / 1` | ❌ **卡死**，同样位置 |
 | `diag_clone.py --num_envs 2 --replicate-physics false` | ❌ 仍卡死 |
 | `diag_clone.py --num_envs 2 --filter-collisions false` | ❌ 仍卡死 |
@@ -70,7 +70,7 @@ Python `D:\miniconda\envs\RM\python.exe`，GPU RTX 4060 Laptop 8 GB。
 
 - **不是** `replicate_physics` —— 关掉它照样卡死。
 - **不是** `filter_collisions` —— 关掉它照样卡死。
-- **不是**训练脚本的问题 —— 同一个环境用 `smoke_test.py` 跑 4 个 env 也卡死。
+- **不是**训练脚本的问题 —— 同一个环境用 `check_robot.py` 跑 4 个 env 也卡死。
 - **不是** GPU 显存 —— 卡死时只用了 2.7 GB / 8 GB，且没有其他进程占用。
 
 ### 3.3 最可能的原因与已做的尝试
@@ -151,14 +151,14 @@ $py = "D:\miniconda\envs\RM\python.exe"
 cd D:\Robomaster\RL
 
 # 1) 运动学验证（秒级，不需要 GPU）
-& $py -B isaac_ws\isaac_ws_infantry\kinematics\test_leg_model.py
+& $py -B isaac_ws\isaac_ws_infantry\kinematics\check_planar_leg.py
 
 # 2) 可达工作空间
-& $py -B isaac_ws\isaac_ws_infantry\kinematics\feasible_workspace.py
+& $py -B isaac_ws\isaac_ws_infantry\kinematics\tools/analyze_workspace.py
 
 # 3) 闭环 + 站立验证（约 2 分钟，需要 GPU）→ PASS
-& $py isaac_ws\scripts\smoke_test.py --headless --num_envs 1 --steps 200 `
-     --report isaac_ws\scripts\smoke_test_report.json
+& $py isaac_ws\scripts\check_robot.py --headless --num_envs 1 --steps 200 `
+     --report isaac_ws\scripts\check_robot_report.json
 
 # 4) 复现"多环境卡死"（这是本沙箱的限制）
 & $py isaac_ws\scripts\diag_clone.py --num_envs 2 --steps 3 --headless

@@ -18,7 +18,7 @@ import torch
 from isaaclab.managers import ActionTerm, ActionTermCfg
 from isaaclab.utils import configclass
 
-from ..model import (
+from ..robot_model import (
     HIP_ORDER,
     KNEE_ORDER,
     WHEEL_ORDER,
@@ -123,6 +123,14 @@ class FiveBarJointAction(ActionTerm):
         #: last estimated (dL0_l, dphi_l, dL0_r, dphi_r)
         self.leg_rate = torch.zeros(self.num_envs, 4, device=self.device)
 
+        # --- action history, for the jerk penalty ------------------------
+        # action_rate penalises |a[t] - a[t-1]|, i.e. ALL motion, which is why raising it
+        # makes the legs stiff.  The second difference a[t] - 2a[t-1] + a[t-2] is ~0 for
+        # smooth motion (constant / ramp / parabola) and only large for a tremor that
+        # reverses every step, so it can be penalised hard without stiffening the legs.
+        self._action_prev1 = torch.zeros(self.num_envs, self._action_dim, device=self.device)
+        self._action_prev2 = torch.zeros(self.num_envs, self._action_dim, device=self.device)
+
     # ------------------------------------------------------------------ #
     # properties required by ActionTerm
     # ------------------------------------------------------------------ #
@@ -174,12 +182,36 @@ class FiveBarJointAction(ActionTerm):
     # action pipeline
     # ------------------------------------------------------------------ #
     def process_actions(self, actions: torch.Tensor):
+        # A non-finite policy output (possible once the observation normaliser has been
+        # poisoned by a NaN, or right after a numerically bad solve) must never reach
+        # PhysX: NaN joint targets corrupt the GPU solver and surface as
+        # "CUDA error: an illegal memory access".  Sanitising here turns that into a
+        # harmless zero action for the affected environment.
+        actions = torch.nan_to_num(actions, nan=0.0, posinf=0.0, neginf=0.0)
+        # shift the history BEFORE storing the new sample: after this call the order is
+        # (_action_prev2, _action_prev1, _raw_actions) = (a[t-2], a[t-1], a[t])
+        self._action_prev2 = self._action_prev1
+        self._action_prev1 = self._raw_actions.clone()
         self._raw_actions[:] = actions
         self._processed_actions = self._raw_actions * self._scale
         self._hip_targets = torch.clamp(
             self._nominal_hips + self._processed_actions[:, : self._num_hips], self._hip_lower, self._hip_upper
         )
         self._wheel_targets = self._processed_actions[:, self._num_hips :]
+
+    def action_jerk(self) -> torch.Tensor:
+        """Second difference of the action, ``a[t] - 2 a[t-1] + a[t-2]``, ``(N, 6)``.
+
+        WHY THE SECOND DIFFERENCE AND NOT THE FIRST
+        -------------------------------------------
+        ``action_rate`` charges ``|a[t] - a[t-1]|``, which penalises ALL motion -- raising
+        that weight is what makes the legs stiff and unable to catch a pitch disturbance.
+        The second difference is ~0 for any *smooth* motion (constant, ramp, even a
+        parabola), and large only when the action reverses direction every step, i.e. for
+        exactly the high-frequency tremor we want to remove.  It lets the legs move fast
+        while making a dithering leg expensive.
+        """
+        return self._raw_actions - 2.0 * self._action_prev1 + self._action_prev2
 
     def apply_actions(self):
         # hips: position targets relative to the nominal stance
@@ -301,6 +333,8 @@ class FiveBarJointAction(ActionTerm):
         # previous sample -- the first post-reset rate is reported as zero
         self._leg_prev_valid[env_ids] = False
         self.leg_rate[env_ids] = 0.0
+        self._action_prev1[env_ids] = 0.0
+        self._action_prev2[env_ids] = 0.0
         if isinstance(env_ids, slice):
             self._knee_seed[:] = self.model.nominal_knees.view(1, 2, 2)
             self._knee_targets[:] = self._nominal_knees
@@ -324,16 +358,21 @@ class FiveBarJointAction(ActionTerm):
         knees, residual = self.model.solve_knees(
             hip_pos, self._knee_seed[:, 0, :], self._knee_seed[:, 1, :]
         )
+        # A divergent Newton solve can return NaN.  PhysX joint targets must stay finite
+        # (clamp does NOT repair NaN), and a bad warm start would otherwise keep
+        # poisoning the next step, so fall back to the nominal knees for those envs.
+        finite = torch.isfinite(knees).all(dim=-1, keepdim=True)
+        knees = torch.where(finite, knees, self._nominal_knees)
         # keep the (possibly clamped) targets inside the URDF knee limits
         clamped = torch.clamp(knees, self._knee_lower, self._knee_upper)
         self.knee_target_clamped = (clamped - knees).abs() > 1e-9
         self._knee_clamped_total += self.knee_target_clamped.sum()
         self._knee_targets = clamped
-        self.solver_residual = residual
+        self.solver_residual = torch.nan_to_num(residual, nan=0.0, posinf=1.0, neginf=1.0)
         # the loop state changed, so the cached measured closure is stale
         self._closure_cache = None
         self._knee_seed = torch.stack(
-            (knees[:, 0:2], knees[:, 2:4]), dim=1
+            (clamped[:, 0:2], clamped[:, 2:4]), dim=1
         ).detach()  # (N, 2 sides, 2 knees), warm start for the next step
         return self._knee_targets
 
@@ -389,14 +428,27 @@ class FiveBarJointAction(ActionTerm):
         Called once per control step from the observation term.  Environments that have
         just been reset report zero (their pose jumped, so a difference would be
         meaningless).
+
+        The result is sanitised: with the wide speed range the robot regularly ends up in
+        poses where the five-bar has no valid solution, and ``leg_state`` then returns
+        NaN/Inf.  A NaN that reaches the observation would poison the running
+        normaliser and, through the policy, the joint targets handed to PhysX -- which is
+        one of the ways a "CUDA illegal memory access" can appear.  Non-finite and
+        absurd rates are therefore replaced by 0 / clamped.
         """
         state = self.measured_leg_state()
         dt = float(self._env.step_dt)
         fresh = self._leg_prev_valid
         # where a previous sample exists, differentiate; elsewhere stay at zero
         rate = (state - self._leg_state_prev) / dt
-        self.leg_rate = torch.where(fresh.unsqueeze(-1), rate, torch.zeros_like(rate))
-        self._leg_state_prev = state
+        rate = torch.where(fresh.unsqueeze(-1), rate, torch.zeros_like(rate))
+        # a physically sane leg reaches ~1 m/s of length change and ~20 rad/s of swing;
+        # anything beyond that is a bad solve, not motion
+        rate = torch.nan_to_num(rate, nan=0.0, posinf=0.0, neginf=0.0)
+        self.leg_rate = rate.clamp(-50.0, 50.0)
+        # keep the stored previous sample finite as well, otherwise one bad frame would
+        # keep producing NaN differences on every following step
+        self._leg_state_prev = torch.nan_to_num(state, nan=0.0, posinf=0.0, neginf=0.0)
         self._leg_prev_valid[:] = True
         return self.leg_rate
 

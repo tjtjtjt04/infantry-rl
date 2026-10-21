@@ -3,7 +3,7 @@
 Every check compares against an exact double-precision forward kinematics of the
 URDF, so a pass means the model is faithful, not merely self-consistent.
 
-Run:  python isaac_ws/isaac_ws_infantry/kinematics/test_leg_model.py
+Run:  python isaac_ws/isaac_ws_infantry/kinematics/check_planar_leg.py
 """
 
 from __future__ import annotations
@@ -20,8 +20,8 @@ WS = HERE.parent.parent  # isaac_ws
 URDF = WS / "assets" / "infantry-rl" / "urdf" / "infantry-rl-sim.urdf"
 sys.path.insert(0, str(HERE))
 
-from five_bar import UrdfTree  # noqa: E402
-from leg_model import (  # noqa: E402
+from urdf_tree import UrdfTree  # noqa: E402
+from planar_leg import (  # noqa: E402
     LegPlanar,
     leg_limits,
     make_torch_loop_solver,
@@ -183,7 +183,7 @@ def main() -> int:
     # ---------------------------------------------------------------- 7
     print("\n[7] dump the measured model constants (for the env config)")
     dump = {side: legs[side].to_dict() for side in ("left", "right")}
-    out = WS / "config" / "leg_model.json"
+    out = WS / "config" / "planar_leg.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(dump, indent=2), encoding="utf-8")
     print(f"    wrote {out}")

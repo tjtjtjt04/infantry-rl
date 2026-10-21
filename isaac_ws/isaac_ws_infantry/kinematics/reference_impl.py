@@ -1,205 +1,23 @@
-"""Closed-loop five-bar kinematics for the infantry-rl wheel-leg robot.
+"""numpy reference implementation of the planar five-bar leg (verification only).
 
-WHY THIS MODULE EXISTS
-----------------------
-``infantry-rl-sim.urdf`` describes each leg as a TREE plus one non-standard
-``<loop_joint>`` that turns it into a parallel five-bar linkage.  URDF cannot
-express a closed chain, and neither can a PhysX articulation, so the closure has
-to be re-imposed by CONTROL: the two knee joints of a leg are passive followers
-whose targets must satisfy the loop every step.
+This is the first, straightforward version of the planar leg model and its loop solver.
+The RUNTIME uses :mod:`isaac_ws_infantry.kinematics.planar_leg` instead, which is the
+same geometry rewritten as a batched torch solver with an analytic Jacobian; this file
+is kept because the tests compare the two implementations against the exact URDF
+forward kinematics in :mod:`isaac_ws_infantry.kinematics.urdf_tree`.
 
-MEASURED ON THIS MACHINE (Isaac Sim 5.1.0.0 + Isaac Lab 2.3.2)
---------------------------------------------------------------
-Importing the URDF yields an articulation with exactly **10** joints::
-
-    left/right_front_hip, left/right_back_hip,
-    left/right_front_knee, left/right_back_knee,
-    left/right_wheel
-
-The two ``loop_joints/*_calf_axle`` prims ARE written into the USD, but they are
-NOT part of the articulation's degrees of freedom: spawning the asset, zeroing all
-drives and stepping 240 times leaves ``*_back_calf`` dangling (the wheel/back-calf
-distance stays pinned at the distance between the two link ORIGINS, 0.2715 m,
-instead of the ~0 it would be if the loop were closed).
-
-THE MECHANISM, AND WHY IT IS PLANAR
------------------------------------
-Every joint axis is ``(0, +/-1, 0)`` **in its own parent frame** -- including after
-the ``rpy = 0 0 -pi`` of the right-leg hip origins, because a rotation about Z does
-not change a Y axis.  Every revolute joint therefore rotates its subtree about an
-axis parallel to the body Y axis, and the wheel-normal plane of that rotation is
-the body **X-Z** plane::
-
-    +X = forward,  +Z = up,  rotation axis = the body Y direction
-
-Measured consequence (finite differences on the exact URDF FK): every joint moves
-the wheel axle with ``dY/dq == 0`` exactly.  Each leg is a planar linkage in a
-plane ``y = const``:
-
-    left  leg: y = +0.2189 (front chain) / +0.2189 (back chain)
-    right leg: y = -0.2189
-
-MODEL
------
-For side ``s`` the two sub-chains are::
-
-    front:  K1 = A + Ry(a_fh + q1) @ p        (A  = front hip axis)
-            W  = K1 + Ry(a_fc + q1 + q5) @ r  (K1 = front knee axis)
-    back:   K4 = B + Ry(b_bh + q4) @ s        (B  = back hip axis)
-            E  = K4 + Ry(b_bc + q4 + q6) @ t  (K4 = back knee axis)
-
-with ``Ry(t)`` the rotation about the body +Y axis acting on (x, z), so
-``Ry(t) @ (x, z) = (x cos t + z sin t, -x sin t + z cos t)``.  Closure requires
-``W == E``, which is **2 equations**; the mechanism has 4 joints, hence 2 degrees
-of freedom per leg.  Commanding the two hips therefore determines both knees, which
-is exactly how the real firmware works (two hip motors per leg).
-
-Crucially, ``p, r, s, t`` are offsets expressed in their OWN link frames and
-``a_fh, a_fc, b_bh, b_bc`` are ABSOLUTE angles at the zero configuration -- the
-earlier version of this file confused absolute and relative angles, which broke the
-model.  All eight constants plus ``A`` and ``B`` are extracted numerically from the
-exact URDF FK by :func:`PlanarLeg.from_urdf` and then verified against that same FK
-in ``test_five_bar.py`` (agreement < 1e-9 m over thousands of random poses).
-
-SIGN CONVENTION
----------------
-The URDF joint values already follow the hardware convention required: **positive
-joint value = counter-clockwise seen from the motor output shaft**, for all 12
-joints and both sides.  See ``docs/DESIGN.md``.  Nothing here flips an axis.
+Do not import this from the tasks -- it is numpy/scalar and far too slow for training.
 """
 
 from __future__ import annotations
 
 import math
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
-# --------------------------------------------------------------------------- #
-# Minimal exact URDF tree + forward kinematics
-# --------------------------------------------------------------------------- #
-def _rpy(r: float, p: float, y: float) -> np.ndarray:
-    cr, sr, cp, sp, cy, sy = math.cos(r), math.sin(r), math.cos(p), math.sin(p), math.cos(y), math.sin(y)
-    return np.array(
-        [
-            [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr, 0.0],
-            [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr, 0.0],
-            [-sp, cp * sr, cp * cr, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
-        ]
-    )
-
-
-def _axis_angle(axis, q: float) -> np.ndarray:
-    a = np.asarray(axis, dtype=float)
-    n = float(np.linalg.norm(a))
-    if n < 1e-15:
-        return np.eye(4)
-    x, y, z = a / n
-    c, s, C = math.cos(q), math.sin(q), 1.0 - math.cos(q)
-    return np.array(
-        [
-            [x * x * C + c, x * y * C - z * s, x * z * C + y * s, 0.0],
-            [y * x * C + z * s, y * y * C + c, y * z * C - x * s, 0.0],
-            [z * x * C - y * s, z * y * C + x * s, z * z * C + c, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
-        ]
-    )
-
-
-def rot_xz(v, a: float) -> tuple[float, float]:
-    """Rotate an (x, z) offset by ``a``, standard CCW: ``[[c,-s],[s,c]]``.
-
-    Defined so that ``rot_xz(v, a)`` moves the polar angle of ``v`` by exactly
-    ``+a``.  That makes the model's joint bookkeeping literal: if a measurement
-    says a link's polar angle changes at rate ``-1`` per unit joint value, the
-    model simply writes ``a0 - q``.
-    """
-    c, s = math.cos(a), math.sin(a)
-    return (v[0] * c - v[1] * s, v[0] * s + v[1] * c)
-
-
-def ang_xz(v) -> float:
-    """The polar angle ``atan2(z, x)``; ``rot_xz(v, a - ang_xz(v))`` is axis aligned."""
-    return math.atan2(v[1], v[0])
-
-
-def _check_rot_ang() -> None:
-    """Assert that rot_xz advances the polar angle by exactly its argument."""
-    for v in ((0.3, -0.4), (0.145, -0.001), (-0.22, -0.15653)):
-        for a in (0.0, 0.37, -1.1):
-            r = rot_xz(v, a)
-            d = (ang_xz(r) - (ang_xz(v) + a) + math.pi) % (2 * math.pi) - math.pi
-            assert abs(d) < 1e-12, f"rot_xz angle drift for {v}, a={a}"
-            assert abs(math.hypot(*r) - math.hypot(*v)) < 1e-12, f"rot_xz not norm preserving for {v}"
-
-
-_check_rot_ang()
-
-
-class UrdfTree:
-    """Exact URDF forward kinematics; enough to derive and verify the model."""
-
-    def __init__(self, path: str | Path):
-        root = ET.parse(str(path)).getroot()
-        self.joints: dict[str, dict] = {}
-        for j in root.findall("joint"):
-            o = j.find("origin")
-            xyz = np.array([float(v) for v in (o.get("xyz", "0 0 0").split() if o is not None else "0 0 0".split())])
-            rpy = [float(v) for v in (o.get("rpy", "0 0 0").split() if o is not None else "0 0 0".split())]
-            a = j.find("axis")
-            axis = np.array([float(v) for v in (a.get("xyz", "1 0 0").split() if a is not None else "1 0 0".split())])
-            lim = j.find("limit")
-            self.joints[j.get("name")] = {
-                "parent": j.find("parent").get("link"),
-                "child": j.find("child").get("link"),
-                "xyz": xyz,
-                "rpy": rpy,
-                "axis": axis,
-                "type": j.get("type"),
-                "lower": float(lim.get("lower", "-inf")) if lim is not None else -math.inf,
-                "upper": float(lim.get("upper", "inf")) if lim is not None else math.inf,
-                "effort": float(lim.get("effort", "0")) if lim is not None else 0.0,
-                "velocity": float(lim.get("velocity", "0")) if lim is not None else 0.0,
-            }
-        self.loops: list[dict] = []
-        for lj in root.findall("loop_joint"):
-            l1, l2 = lj.find("link1"), lj.find("link2")
-            self.loops.append(
-                {
-                    "name": lj.get("name"),
-                    "type": lj.get("type"),
-                    "link1": l1.get("link"),
-                    "xyz1": np.array([float(v) for v in l1.get("xyz", "0 0 0").split()]),
-                    "link2": l2.get("link"),
-                    "xyz2": np.array([float(v) for v in l2.get("xyz", "0 0 0").split()]),
-                }
-            )
-
-    def solve_frames(self, q: dict[str, float] | None = None) -> dict[str, np.ndarray]:
-        q = q or {}
-        frames = {"base_link": np.eye(4)}
-        remaining = dict(self.joints)
-        while remaining:
-            progressed = False
-            for name, j in list(remaining.items()):
-                if j["parent"] not in frames:
-                    continue
-                T = np.eye(4)
-                T[:3, :3] = _rpy(*j["rpy"])[:3, :3]
-                T[:3, 3] = j["xyz"]
-                t = frames[j["parent"]] @ T
-                if j["type"] in ("revolute", "continuous"):
-                    t = t @ _axis_angle(j["axis"], q.get(name, 0.0))
-                frames[j["child"]] = t
-                del remaining[name]
-                progressed = True
-            if not progressed:
-                raise RuntimeError(f"URDF is not a tree; unresolved joints: {list(remaining)}")
-        return frames
-
+from urdf_tree import UrdfTree, ang_xz, rot_xz, _rpy
 
 # --------------------------------------------------------------------------- #
 # Planar model of one leg

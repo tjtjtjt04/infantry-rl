@@ -35,11 +35,11 @@ Get-Process python -ErrorAction SilentlyContinue | Stop-Process -Force
 & $py isaac_ws\scripts\prepare_asset.py
 
 # 2) 验证运动学与闭环（秒级，不需要 GPU）→ 全部通过
-& $py -B isaac_ws\isaac_ws_infantry\kinematics\test_leg_model.py
+& $py -B isaac_ws\isaac_ws_infantry\kinematics\check_planar_leg.py
 
 # 3) 冒烟测试：机器人站起来、闭环残差 < 1 mm（约 2 分钟，需要 GPU）→ PASS
-& $py isaac_ws\scripts\smoke_test.py --headless --num_envs 1 --steps 200 `
-     --report isaac_ws\scripts\smoke_test_report.json
+& $py isaac_ws\scripts\check_robot.py --headless --num_envs 1 --steps 200 `
+     --report isaac_ws\scripts\check_robot_report.json
 
 # 4) 训练（当前只能用 1 个环境，原因见 VERIFIED_RESULTS.md）
 & $py isaac_ws\scripts\train.py --task Infantry-RL-Balance-v0 --headless --num_envs 1
@@ -58,7 +58,7 @@ isaac_ws/
 │   └── infantry_rl_proxy.usd        代理资产（几 KB，能多环境但碰撞不准）
 ├── config/
 │   ├── joint_map.json               全部关节的轴 / 限位 / 角色
-│   ├── leg_model.json               实测出的腿部平面模型常数
+│   ├── planar_leg.json              实测出的腿部平面模型常数
 │   ├── nominal_pose.json            精确的标称站立位
 │   ├── feasible_poses.json          可达工作空间包络
 │   └── proxy_geometry.json          代理资产的实测几何
@@ -68,11 +68,11 @@ isaac_ws/
 │   └── API_NOTES.md                 Isaac Lab 2.3.2 精确 API 速查（带源码行号）
 ├── isaac_ws_infantry/
 │   ├── kinematics/                  ★ 已验证的运动学与闭环求解器
-│   │   ├── five_bar.py              URDF 精确正运动学
-│   │   ├── leg_model.py             腿模型 + 闭环求解（numpy / torch 批量）
-│   │   ├── test_leg_model.py        验证脚本（全通过）
-│   │   └── feasible_workspace.py    工作空间扫描
-│   ├── model.py                     模型/配置/几何的共享桥接
+│   │   ├── urdf_tree.py              URDF 精确正运动学
+│   │   ├── planar_leg.py            平面腿模型 + 闭环求解（torch 批量）
+│   │   ├── check_planar_leg.py        验证脚本（全通过）
+│   │   └── tools/analyze_workspace.py    工作空间扫描
+│   ├── robot_model.py               机器人模型：关节/限位/名义姿态/批量求解
 │   ├── robots/infantry_rl.py        ArticulationCfg
 │   ├── mdp/                         观测 / 奖励 / 动作项
 │   └── tasks/balance/               环境配置 + 环境类 + gym 注册
@@ -81,7 +81,7 @@ isaac_ws/
     ├── build_proxy_asset.py         生成轻量代理资产
     ├── extract_joint_map.py         导出关节表
     ├── train.py / play.py           rsl-rl PPO 入口
-    ├── smoke_test.py                闭环与站立验证
+    ├── check_robot.py                闭环与站立验证
     └── diag_clone.py                复现"多环境卡死"的诊断脚本
 ```
 
@@ -118,7 +118,7 @@ num_joints = 10        has_calf_axle_joint = False
 **4 个膝做从动件**，每个控制步用解析闭环求解器解出膝角并写进位置目标
 （热启动，1~2 次牛顿迭代收敛）。
 
-实测效果（`smoke_test.py`，200 步随机动作）：闭环残差
+实测效果（`check_robot.py`，200 步随机动作）：闭环残差
 **最大 0.79 mm / 平均 0.47 mm**，机体高度维持在 0.167–0.205 m，零次跌倒。
 
 ### 3. 腿是 X–Z 平面机构，模型精度到机器精度
@@ -160,4 +160,4 @@ num_joints = 10        has_calf_axle_joint = False
 - `base_link.STL` 57 MB → USD 96 MB，首次导入慢；底盘碰撞体是它的凸包
   （PhysX 已成功 cook，机器人能稳定落地）。若接触不稳，建议换盒体代理碰撞。
 - 闭环是用 PD 驱动被动关节**近似**的，不是硬约束。高速运动下会有几毫米形变，
-  `smoke_test.py` 会打印实测残差。
+  `check_robot.py` 会打印实测残差。

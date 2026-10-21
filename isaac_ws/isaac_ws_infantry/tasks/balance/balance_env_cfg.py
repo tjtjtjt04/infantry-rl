@@ -1,4 +1,10 @@
-"""Balance task configuration for the infantry-rl five-bar robot.
+"""Balance task configuration (LEGACY: the main task is now ``locomotion``).
+
+The scene, action term and termination set are shared and live in
+:mod:`isaac_ws_infantry.tasks.common.robot_env_cfg`; this file only holds what is
+specific to "stand still and hold a heading/position".
+
+Original notes: balance task configuration for the infantry-rl five-bar robot.
 
 Mirrors the shape of Isaac Lab 2.3.2's own manager-based tasks (see
 ``isaac_ws/docs/API_NOTES.md`` sections 10 and GOTCHAS), with two deliberate
@@ -13,105 +19,31 @@ departures forced by this machine and this robot:
 from __future__ import annotations
 
 import isaaclab.envs.mdp as base_mdp
-import isaaclab.sim as sim_utils
-from isaaclab.assets import AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
-from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 
 import isaac_ws_infantry.mdp as mdp
-from isaac_ws_infantry.model import nominal_base_height
-from isaac_ws_infantry.robots import INFANTRY_RL_CFG
-from isaac_ws_infantry.terrains import ensure_ground_usd
+from isaac_ws_infantry.tasks.common.robot_env_cfg import (  # noqa: F401
+    FALL_ANGLE,
+    FALL_HEIGHT,
+    NOMINAL_HEIGHT,
+    ActionsCfg,
+    RobotSceneCfg,
+    TARGET_HEADING,
+    TARGET_X,
+    TARGET_Y,
+    TerminationsCfg,
+)
 
-#: root height (m) of the measured nominal stance; the base-height reward holds this
-NOMINAL_HEIGHT = nominal_base_height()
-#: root height below which the robot counts as fallen (m)
-FALL_HEIGHT = 0.11
-#: tilt at which the robot counts as fallen (rad)
-FALL_ANGLE = 1.2
-#: heading (rad) the robot is supposed to hold. All environments spawn with an
-#: identity base orientation, so 0 means "same direction as at reset".
-TARGET_HEADING = 0.0
 #: |heading error| (rad) inside which the bounded ``heading_alive`` bonus is paid
 HEADING_TOLERANCE = 0.35
-#: planar position (m) the robot is supposed to hold, in the ENVIRONMENT frame
-#: (``env_origins`` is the spawn point, so (0, 0) = "do not translate").  To command a
-#: displacement, change these two numbers -- or see the outer-loop option below.
-TARGET_X = 0.0
-TARGET_Y = 0.0
 #: distance (m) inside which the bounded ``position_xy_alive`` bonus is paid
 POSITION_TOLERANCE = 0.2
-
-
-@configclass
-class BalanceSceneCfg(InteractiveSceneCfg):
-    """Flat ground + the robot. Everything is local, nothing is fetched."""
-
-    terrain = TerrainImporterCfg(
-        prim_path="/World/ground",
-        terrain_type="usd",
-        usd_path=ensure_ground_usd(),
-        collision_group=-1,
-        physics_material=sim_utils.RigidBodyMaterialCfg(
-            friction_combine_mode="multiply",
-            restitution_combine_mode="multiply",
-            static_friction=1.0,
-            dynamic_friction=0.9,
-            restitution=0.0,
-        ),
-        debug_vis=False,
-    )
-
-    robot = INFANTRY_RL_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
-
-    light = AssetBaseCfg(
-        prim_path="/World/light",
-        spawn=sim_utils.DistantLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75)),
-    )
-
-    dome_light = AssetBaseCfg(
-        prim_path="/World/dome_light",
-        spawn=sim_utils.DomeLightCfg(intensity=500.0, color=(0.6, 0.6, 0.6)),
-    )
-
-
-@configclass
-class ActionsCfg:
-    """Action specifications for the MDP."""
-
-    joints = mdp.FiveBarJointActionCfg(
-        asset_name="robot",
-        hip_scale=0.25,
-        wheel_scale=5.0,
-        hip_range=0.45,
-        limit_margin=0.01,
-        # 2 is provably enough (worst-case residual 3.6 um vs 750 um achievable in sim);
-        # each extra iteration costs ~150 CUDA kernel launches per control step.
-        solver_iters=2,
-        # outer heading loop; enabled via __post_init__ / INFANTRY_RL_HEADING_CONTROL
-        heading_control=False,
-        heading_mode="override",
-        target_heading=TARGET_HEADING,
-        heading_kp=3.0,
-        heading_kd=0.35,
-        heading_max_yaw_rate=3.0,
-        wheel_radius=0.068,
-        track_width=0.4379,
-        # outer position loop; enabled via __post_init__ / INFANTRY_RL_POSITION_CONTROL
-        position_control=False,
-        target_position_x=TARGET_X,
-        target_position_y=TARGET_Y,
-        position_kp=1.5,
-        position_kd=0.6,
-        position_max_speed=0.6,
-    )
 
 
 @configclass
@@ -221,23 +153,12 @@ class RewardsCfg:
 
 
 @configclass
-class TerminationsCfg:
-    """Termination terms for the balance task."""
-
-    time_out = DoneTerm(func=base_mdp.time_out, time_out=True)
-    bad_orientation = DoneTerm(func=base_mdp.bad_orientation, params={"limit_angle": FALL_ANGLE})
-    base_too_low = DoneTerm(
-        func=base_mdp.root_height_below_minimum, params={"minimum_height": FALL_HEIGHT}
-    )
-
-
-@configclass
 class BalanceEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for the infantry-rl balance environment."""
 
     #: 1024 is the largest environment count this machine can run without running the
     #: 8 GB GPU (and PhysX' fabric path) out of memory; ``--num_envs`` overrides it.
-    scene: BalanceSceneCfg = BalanceSceneCfg(num_envs=1024, env_spacing=2.5)
+    scene: RobotSceneCfg = RobotSceneCfg(num_envs=1024, env_spacing=2.5)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     rewards: RewardsCfg = RewardsCfg()
@@ -254,7 +175,11 @@ class BalanceEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.dt = 0.005
         self.sim.render_interval = self.decimation
         self.sim.physics_material = self.scene.terrain.physics_material
-        self.sim.physx.gpu_max_rigid_patch_count = 10 * 2**15
+        # Isaac Lab's default is 5 * 2**15; this scene only has a flat ground plane and
+        # 1024 small robots (~11 links each), so the doubled buffer bought nothing and
+        # only added GPU memory pressure -- the exact resource whose exhaustion shows up
+        # as "CUDA error: an illegal memory access" inside the PhysX GPU allocator.
+        self.sim.physx.gpu_max_rigid_patch_count = 5 * 2**15
 
         # ------------------------------------------------------------------ #
         # GPU stability knobs (environment variables, so no code edit is needed)
@@ -388,7 +313,7 @@ class BalanceEnvCfg_PLAY(BalanceEnvCfg):
 __all__ = [
     "BalanceEnvCfg",
     "BalanceEnvCfg_PLAY",
-    "BalanceSceneCfg",
+    "RobotSceneCfg",
     "ActionsCfg",
     "ObservationsCfg",
     "RewardsCfg",

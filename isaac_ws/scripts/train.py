@@ -144,6 +144,66 @@ torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
 
 
+def _hidden_dims_from_state_dict(state_dict: dict) -> list[int]:
+    """Recover ``[h1, h2, ...]`` from the ``mlp.<i>.weight`` entries of a model state dict.
+
+    rsl_rl stores the MLP as ``Linear -> ELU -> Linear -> ... -> Linear``, so the linear
+    layers live at even indices and the hidden widths are the ``out_features`` of every
+    layer except the output one.  Returns ``[]`` when the layout is not recognised.
+    """
+    widths: dict[int, int] = {}
+    for key, value in state_dict.items():
+        if not key.startswith("mlp.") or not key.endswith(".weight"):
+            continue
+        parts = key.split(".")
+        if len(parts) != 3:
+            continue
+        try:
+            index = int(parts[1])
+        except ValueError:
+            continue
+        widths[index] = int(value.shape[0])
+    ordered = [widths[i] for i in sorted(widths)]
+    return ordered[:-1] if len(ordered) > 1 else []
+
+
+def _match_network_to_checkpoint(checkpoint_path: str, agent_cfg) -> None:
+    """Patch ``agent_cfg`` so a resumed model matches the checkpoint it loads.
+
+    Changing ``hidden_dims`` in the config makes every existing checkpoint unloadable
+    (``size mismatch for mlp.0.weight``), which would silently block all continuation
+    runs.  When *resuming*, the checkpoint's architecture is the correct one -- you
+    cannot change the network and continue the same weights anyway -- so read the widths
+    back from the state dict and adopt them, with a notice.
+    """
+    try:
+        ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    except Exception as exc:  # noqa: BLE001 - never let inspection break training
+        print(f"[INFO] could not inspect the checkpoint architecture ({exc}); using config")
+        return
+
+    changed = False
+    for name in ("actor", "critic"):
+        state_dict = ckpt.get(f"{name}_state_dict")
+        if not isinstance(state_dict, dict):
+            continue
+        dims = _hidden_dims_from_state_dict(state_dict)
+        if not dims:
+            continue
+        current = list(getattr(agent_cfg, name).hidden_dims or [])
+        if current != dims:
+            print(f"[INFO] {name} hidden_dims: config {current} -> checkpoint {dims} (resuming with the checkpoint shape)")
+            getattr(agent_cfg, name).hidden_dims = dims
+            changed = True
+
+    actor_sd = ckpt.get("actor_state_dict") or {}
+    first_weight = actor_sd.get("mlp.0.weight")
+    if first_weight is not None:
+        print(f"[INFO] checkpoint observation dim = {int(first_weight.shape[1])} (env must match)")
+    if not changed:
+        print("[INFO] checkpoint architecture matches the configured network")
+
+
 def _newest_checkpoint(log_root_path: str, load_run: str | None = None) -> str:
     """The most-trained ``model_<N>.pt`` of an experiment, across ALL run directories.
 
@@ -222,6 +282,157 @@ def _newest_checkpoint(log_root_path: str, load_run: str | None = None) -> str:
     return os.path.abspath(path)
 
 
+def _clamp_policy_std(runner, low: float = 0.06, high: float = 0.4) -> None:
+    """Bound the Gaussian exploration noise of the policy in place.
+
+    WHY THIS IS NEEDED
+    ------------------
+    rsl_rl's default ``GaussianDistribution`` keeps the standard deviation as a *raw*
+    unconstrained ``nn.Parameter``:
+
+        self.std_param = nn.Parameter(init_std * torch.ones(output_dim))
+
+    With ``std_type="scalar"`` the entropy term alone gives it a gradient
+    ``d(entropy_coef * H)/d(sigma) = entropy_coef * n_dims / sigma`` which is always
+    POSITIVE.  If the policy-gradient side does not push back hard enough, sigma grows
+    without bound.  Measured on the 2026-10-21 run with ``entropy_coef = 0.015``:
+
+        iter 0    mean_std =   0.50
+        iter 999  mean_std =  33.72
+        iter 3999 mean_std = 168.90
+
+    At that point every action is essentially uniform noise clipped to +/-4, so the
+    robot thrashes (large yaw rate, stop-and-go forward speed) and falls.
+
+    The opposite failure is just as real: with ``entropy_coef = 0.005`` on the earlier
+    reward set the noise collapsed to 0.067 and the policy could not discover walking.
+    So BOTH ends need a bound.  Since v1.0.5 the window is [0.03, 0.4]: at the previous
+    [0.02, 1.0] the equilibrium sat ON the ceiling -- measured ``mean_std = 0.9999`` --
+    so the policy was trained under ~14 deg of hip noise and came out jittery.  In
+    physical units [0.03, 0.4] means:
+
+        hip   noise: 0.03 * 0.25 rad = 0.43 deg  ..  0.4 * 0.25 rad = 5.7 deg
+        wheel noise: 0.03 * 5 rad/s  = 0.15 rad/s ..  0.4 * 5 rad/s  = 2.0 rad/s
+
+    The clamp is applied to the parameter BEFORE the distribution is built each step, so
+    the sample itself already uses the bounded value (clamping afterwards would be too
+    late).  It is a safety net, not a tuning knob: the entropy coefficient should be
+    chosen so the equilibrium sits strictly inside the window.
+    """
+    # rsl_rl keeps the policy on ``PPO.actor`` (``get_policy()`` returns it); fall back to
+    # the older ``alg.policy`` spelling in case the naming changes again.
+    policy = None
+    get_policy = getattr(runner.alg, "get_policy", None)
+    if callable(get_policy):
+        policy = get_policy()
+    if policy is None:
+        policy = getattr(runner.alg, "policy", None) or getattr(runner.alg, "actor", None)
+    dist = getattr(policy, "distribution", None)
+    std_param = getattr(dist, "std_param", None)
+    if std_param is None:
+        # heteroscedastic / log-parameterised policies have no single std tensor
+        print("[INFO] policy std is not a single raw tensor -- no clamp applied")
+        return
+
+    original_update = dist.update
+
+    def clamped_update(mlp_output):
+        with torch.no_grad():
+            dist.std_param.clamp_(low, high)
+        original_update(mlp_output)
+
+    dist.update = clamped_update
+    with torch.no_grad():
+        std_param.clamp_(low, high)
+    print(
+        f"[INFO] policy std clamped to [{low}, {high}] "
+        f"(current {float(std_param.mean()):.4f})"
+    )
+
+
+#: Reward terms whose per-iteration console line is dropped (TensorBoard keeps them).
+#: Listed by NAME, in the order of ``LocomotionRewardsCfg``; the numbers in the comment
+#: are the positions in the "Active Reward Terms" table printed at startup.
+HIDDEN_CONSOLE_TERMS = (
+    "alive",  # 1
+    "fall_penalty",  # 2
+    "base_height",  # 3
+    "pitch",  # 4
+    "roll",  # 5
+    "roll_straight",  # 6
+    "track_lin_vel_x",  # 9
+    "heading_error",  # 11
+)
+
+
+def _print_console_block(logger, kwargs, snapshots, hidden: set[str]) -> None:
+    """Reprint rsl_rl's iteration block minus the hidden terms, with bare names.
+
+    rsl_rl prints ``Episode_Reward/<name>``, ``Metrics/base_velocity/<name>`` and
+    ``Episode_Termination/<name>``; only the last path component is kept here.
+    """
+    def mean_of(key: str) -> float | None:
+        values = []
+        for snap in snapshots:
+            if key in snap:
+                v = snap[key]
+                v = v.detach().cpu().double() if hasattr(v, "detach") else float(v)
+                values.append(float(v.mean()) if hasattr(v, "mean") else float(v))
+        return sum(values) / len(values) if values else None
+
+    def line(label: str, value: str, pad: int = 30) -> str:
+        return f"{label + ':':>{pad}} {value}\n"
+
+    body = "\n" + "#" * 78 + "\n"
+    body += f"{'Learning iteration ' + str(kwargs.get('it', 0)) + '/' + str(kwargs.get('total_it', 0)):^78}\n\n"
+
+    rewbuf = getattr(logger, "rewbuffer", None)
+    std = kwargs.get("action_std")
+    std = float(std.mean()) if std is not None else float("nan")
+
+    for key, value in (kwargs.get("loss_dict") or {}).items():
+        body += line(f"Mean {key} loss", f"{float(value):.4f}")
+    body += line("Mean reward", f"{sum(rewbuf) / len(rewbuf):.2f}" if rewbuf else "n/a")
+    body += line("Mean action std", f"{std:.2f}")
+
+    keys: list[str] = []
+    for snap in snapshots[:1]:
+        keys = list(snap)
+    for key in keys:
+        bare = key.rsplit("/", 1)[-1]
+        if bare in hidden:
+            continue
+        value = mean_of(key)
+        if value is None:
+            continue
+        body += line(bare, f"{value:.4f}", pad=26)
+
+    print(body, end="", flush=True)
+
+
+def _filter_iteration_console(runner, hidden: tuple[str, ...] = HIDDEN_CONSOLE_TERMS) -> None:
+    """Print the iteration block ourselves so that ``hidden`` terms are left out."""
+    logger = getattr(runner, "logger", None)
+    original = getattr(logger, "log", None)
+    if not callable(original):
+        return
+    hidden_set = set(hidden)
+
+    def filtered(**kwargs):
+        snapshots = [dict(e) for e in getattr(logger, "ep_extras", [])]
+        saved = sys.stdout
+        sys.stdout = open(os.devnull, "w")
+        try:
+            original(**kwargs)  # writes every scalar to TensorBoard
+        finally:
+            sys.stdout.close()
+            sys.stdout = saved
+        _print_console_block(logger, kwargs, snapshots, hidden_set)
+
+    logger.log = filtered
+    print(f"[INFO] console hides {len(hidden)} reward terms: {', '.join(hidden)}")
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Train with RSL-RL agent."""
@@ -287,6 +498,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         else:
             resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
 
+        # the runner builds the network from agent_cfg, so the shape has to be
+        # reconciled with the checkpoint BEFORE the runner is created
+        _match_network_to_checkpoint(resume_path, agent_cfg)
+
     # wrap for video recording
     if args_cli.video:
         video_kwargs = {
@@ -320,6 +535,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         runner.load(resume_path)
+
+    # Bounds on the policy's exploration noise (see the docstring).
+    _clamp_policy_std(runner)
+
+    # Console: drop the listed per-term lines, print the rest with bare names.
+    # TensorBoard still receives every scalar.
+    _filter_iteration_console(runner)
 
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)

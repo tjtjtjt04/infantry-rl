@@ -6,7 +6,7 @@ actuated (hip) space, keeps only closures that are inside the limits, and report
 the reachable leg-length / leg-angle envelope.  That envelope is what the RL task
 must command within.
 
-Run:  python isaac_ws/isaac_ws_infantry/kinematics/feasible_workspace.py
+Run:  python isaac_ws/isaac_ws_infantry/kinematics/tools/analyze_workspace.py
 """
 
 from __future__ import annotations
@@ -23,8 +23,8 @@ WS = HERE.parent.parent
 URDF = WS / "assets" / "infantry-rl" / "urdf" / "infantry-rl-sim.urdf"
 sys.path.insert(0, str(HERE))
 
-from five_bar import UrdfTree  # noqa: E402
-from leg_model import LegPlanar, solve_loop  # noqa: E402
+from urdf_tree import UrdfTree  # noqa: E402
+from planar_leg import LegPlanar, solve_loop  # noqa: E402
 
 
 def main() -> int:

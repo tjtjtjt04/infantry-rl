@@ -20,7 +20,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg
 
-from ..model import (
+from ..robot_model import (
     HIP_ORDER,
     KNEE_ORDER,
     USD_PATH,

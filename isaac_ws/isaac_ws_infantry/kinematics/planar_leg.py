@@ -57,7 +57,7 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-from five_bar import UrdfTree, _rpy  # noqa: E402  (exact URDF FK)
+from urdf_tree import UrdfTree, _rpy  # noqa: E402  (exact URDF FK)
 
 
 # --------------------------------------------------------------------------- #
