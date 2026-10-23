@@ -6,9 +6,47 @@
 > 规则：**配置表必须与代码一致**。改完代码如果没同步这里，这个文件就失去意义。
 > 核对方法见 §9「如何确认当前代码版本」。
 
+## ⚠️ 改动后必须同步检查的两个文档
+
+**每次改完代码，这两个文件都要过一遍**（缺一个都算没改完）：
+
+| 文档 | 什么时候必须改 |
+|---|---|
+| **`VERSION.md`**（本文件） | 版本号 + 「冻结配置」对应小节 + 「变更记录」追加一行 |
+| **`TRAINING_GUIDE.md`** | §0 速查 / §5 任务与配置 / §3.1 控制台示例 / 相关操作章节 |
+
+### 对照清单
+
+| 改了什么 | `VERSION.md` 要改 | `TRAINING_GUIDE.md` 要改 |
+|---|---|---|
+| 奖励项、权重、exp 核 `std` | §3.5 表 | §5 奖励表 |
+| 速度范围 / 训练模式 / `_MODE_PRESETS` | §3.6 + 变更记录 | §5「改训练目标」整节（含 **行号**） |
+| PPO 超参 / 网络 / std 限幅 / 熵 | §3.9 表 | §5 配置表 |
+| 观测项 / 动作维度 | §3.3 / §3.4 | §5 任务表的「观测维度」+ 配置表 |
+| 环境变量增删改 | §6 表 | §0 环境变量表 |
+| 新增/删除文件、函数 | §4 文件清单与结构树 | §8 相关脚本 |
+| 删除某个功能 | 变更记录里写明"已移除" | 删掉对应章节，别留死链接 |
+| 控制台输出格式 | — | §3.1 的示例输出 |
+| 机器人参数（质量、轮半径、执行器） | §3.1 / §3.2 | §5 配置表 |
+
+### 收尾动作
+
+改完后**跑一次 1 轮训练**，把启动日志里的 `[cfg] ...` 行和文档里贴的示例逐字对比：
+
+```
+[cfg] train mode          : STRAIGHT  (...)
+[cfg] derived from TARGETS: wheel_scale 5.01 (动作量程上限 1.36 m/s), track_lin std 0.150 m/s, wheel_spin -3.00e-05
+[cfg] command ranges      : vx [+0.20, +1.20] m/s ..., standing envs 10% (vx=0), wz clamp +/-2.50 rad/s, resample 5-10 s
+[cfg] turning             : DISABLED -- heading TARGET pinned to 0 ...
+```
+
+**对不上就是文档过期了。**
+
 ---
 
-# v1.0.8 — 2026-10-22
+---
+
+# v1.0.27 — 2026-10-22
 
 ## 1. 版本定位
 
@@ -82,6 +120,26 @@
 | **v1.0.4** | 2026-10-21 | **关闭转弯**：航向目标锁定为 0（`INFANTRY_RL_ENABLE_TURNING=0` 默认），任务简化为纯直线移动；`heading_error` −0.4→−0.6、`track_ang_vel_z_l2` −0.5→−1.0 | 建议重训（任务定义变了） |
 | **v1.0.5** | 2026-10-21 | 压制腿抖：`entropy_coef` 0.005→0.001、std 限幅 [0.02,1.0]→[0.03,0.4]、新增 `action_jerk`（二阶差分）−0.5、`joint_acc` 1e-7→1e-6 | 建议重训（训练噪声条件变了） |
 | **v1.0.6** | 2026-10-21 | 速度指令范围改为 **仅前进 [+0.2, +1.2] m/s**（`INFANTRY_RL_VX_MIN/MAX` 可调）；停止仍由 10% 站立环境训练 | 建议重训（指令分布变了） |
+| **v1.0.7** | 2026-10-22 | 打破"静止不动"局部最优：`track_lin_vel_x` +4.0→+6.0、`track_lin_vel_x_l2` −1.0→−3.0、`track_ang_vel_z` +1.5→+1.0；`entropy_coef` 0.001→0.003、std 下限 0.03→0.06 恢复探索 | **必须重训** |
+| **v1.0.8** | 2026-10-22 | **精度跟踪**：`track_lin_vel_x` +6.0→+8.0（std 0.25→0.15）、新增 L1 跟踪项（lin −2.0 / yaw −1.0）、L2 加严（−3.0→−6.0 / −1.0→−2.0）、`track_ang_vel_z` +3.0（std 0.35→0.15）；放宽 `action_jerk` −0.5→−0.3、`wheel_torques` 死区 1.0→1.5 | **必须重训** |
+| **v1.0.10** | 2026-10-22 | **加入倒车**：速度指令范围 `[+0.2, +1.2]` → `[-1.2, +1.2]` m/s（对称，前进/倒车同速）；10% 站立环境保留作为 vx=0 刹车样本 | **必须重训**（指令分布变了） |
+| **v1.0.11** | 2026-10-22 | **动态奖励**：新增 `mdp/curriculums.py`，`adaptive_tracking_weights`（按实测误差 → 权重 ×1.05/÷1.05，上限 4 倍）与 `modify_tracking_weights_scheduled`（2000 轮线性 1→3 倍）；由 `INFANTRY_RL_ADAPTIVE_REWARD` 开关，**默认关闭**（**v1.0.15 已整体移除**）。另修：控制台过滤器改为跨帧取 key 并集（否则中途出现的 `Curriculum/*` 不显示） | 可续训（初始 scale=1.0） |
+| **v1.0.12** | 2026-10-22 | **控制台输出**：隐藏全部 `track_*` 行；新增实测物理量 `vel_x`（含 `cmd` 对照）、`pitch`/`yaw` 角（由 `root_quat_w` 反算） | 不需要（只改输出） |
+| **v1.0.13** | 2026-10-22 | **控制台按“可对比项同行”重排**：`vel_x`/`cmd`/`diff` 一行，`pitch`/`roll`/`yaw` 一行，`error_vel_xy`/`error_vel_yaw` 一行（开启自适应时右侧并排显示 `curriculum_*` 权重倍数），惩罚项按一阶/二阶、力矩/加速度成对排列；`roll` 角加入姿态行 | 不需要（只改输出） |
+| **v1.0.14** | 2026-10-22 | 动态奖励开关易用性：`INFANTRY_RL_ADAPTIVE_REWARD` 改为**前缀匹配**（`adapt*` → adaptive、`sched*` → schedule，之前必须写全 `adaptive`）；启动时打印 `[cfg] adaptive reward : ADAPTIVE / SCHEDULE / OFF`（**v1.0.15 已整体移除**） | 不需要 |
+| **v1.0.15** | 2026-10-22 | **移除动态奖励功能**：删除 `mdp/curriculums.py`、`LocomotionCurriculumCfg`、`INFANTRY_RL_ADAPTIVE_REWARD` 开关及控制台 `curriculum_*` 列；奖励权重回到纯静态配置。保留：倒车速度范围、控制台分组排版 | 不需要（行为等同关闭） |
+| **v1.0.16** | 2026-10-22 | **速度目标单点配置**：`LocomotionTargets` 新增 `wheel_scale` / `track_lin_std` / `wheel_spin_weight` 三个派生属性，在 `LocomotionEnvCfg.__post_init__` 里写回动作项与奖励权重 —— 只改 `TARGETS` 里的 `vx_min`/`vx_max` 即可，动作尺度与跟踪核宽度自动跟随；启动日志新增 `[cfg] derived from TARGETS` 行 | **换速度范围后必须重训** |
+| **v1.0.17** | 2026-10-22 | **训练目标单点切换**：新增 `TRAIN_MODE`（`straight` / `turning` / `reverse` / `stand`）—— 改这一个字符串即可同时切换速度范围、航向目标、指令重采样间隔、站立环境比例，以及由速度反推的动作尺度/跟踪核宽度/wheel_spin 权重；启动日志新增 `[cfg] train mode` 行 | **切模式必须重训** |
+| **v1.0.18** | 2026-10-22 | **模式间可续训**：`wheel_scale` / `track_lin_std` / `wheel_spin_weight` 改为按固定 `reference_max_vx=1.2` 计算（此前按各模式最高速算，导致 straight→turning 的动作尺度不同、无法 resume）；`turning` 预设保留 vx 指令 `[0.2,1.0]` 与 10% 站立环境，使直线与刹车能力在转弯训练中得以保留 | 同尺度模式间可续训 |
+| **v1.0.19** | 2026-10-22 | **配置区前置 + 补齐注释**：速度常数（`REF_MAX_VX`/`WHEEL_RADIUS`/`CLIP_ACTIONS`/`ACTION_HEADROOM`）与`TRAIN_MODE`/`_MODE_PRESETS` 统一放到文件最开头（L74–270）；新增 `spin`（原地转到指定航向）与 `yaw_rate`（原地按指令角速度旋转）两种模式，共 6 种；`LocomotionTargets` 新增 `heading_command` 字段 | 见下表 |
+| **v1.0.20** | 2026-10-22 | **速度数字单点化**：`_MODE_PRESETS` 写成完整表格（6 模式 x 12 个速度量，含 vy/wz/heading_command/rel_heading_envs），`LocomotionTargets` **移除全部字段默认值**（改为只读容器 + 派生公式），`TARGETS` 由表格解包构造 —— 全库速度数字只剩文件开头一张表 | 无行为变化 |
+| **v1.0.21** | 2026-10-22 | 修启动日志误标：`[cfg] turning` 原先只看 `enable_turning`，导致 `yaw_rate` 模式被打印成 "DISABLED ... straight-line task"。改为按 `heading_command` 分三种形态打印（锁定 0 / 航向随机 / wz 直接采样） | 无行为变化 |
+| **v1.0.22** | 2026-10-22 | **全部技能合成一个任务**：新增 `mdp/commands.py::SpinAwareVelocityCommand`（按 `rel_spin_envs` 比例把 vx 强制 0、保留航向环算出的 wz，用于学原地旋转）；新增 `TRAIN_MODE="full"`（vx ±1.2 + 航向随机 + 20% 原地旋转 + 10% 站立）；命令项统一换用该子类（`rel_spin_envs=0` 时行为与原先一致，已实测） | 同尺度可续训 |
+| **v1.0.23** | 2026-10-22 | `play.py` 新增 **`--cmd_wz`**（rad/s，直接给偏航角速度，绕过航向环，用于 `yaw_rate` checkpoint）；同时修复固定指令只维持一个重采样窗口就被覆盖的问题（现在把 `time_left` 顶到 1e9） | 无需重训 |
+| **v1.0.24** | 2026-10-22 | **修复 `pitch` 奖励权重笔误**：代码写成 `weight=-.0`（等于 0，pitch 惩罚完全失效），导致 `2026-10-22_01-17-16` 与 `15-22-23` 两次训练在无 pitch 约束下进行；已恢复 `-4.0`（与 §3.5 表一致） | **建议重训**（旧策略未受 pitch 约束） |
+| **v1.0.25** | 2026-10-22 | **修回放 yaw 统计**：`net turn` 原为 `heading[末]−heading[首]`（角度已 wrap 到 ±180°），转过半圈以上完全错（实测转 4 圈 1466° 却报 +26°）→ 改为逐点累加 wrap 增量；新增 **`NET rate`**（累计转角/时长，判断净转速的唯一正确指标）；yaw rate 从世界系改为**机体系**（与指令同坐标系），同时打印世界系交叉检查 | 无需重训 |
+| **v1.0.26** | 2026-10-22 | 回放新增**播放速率统计**：`[play] timing: sim=..s wall=..s -> playback N% of real time`。用于解释"数据转得对但动画看着慢"——实测 1 环境 headless 只有 **61%** 实时，`--real-time` 只能压慢、无法加速；推荐用 `--video` 录帧后按 50 fps 播放，或直接看 `NET rate` | 无需重训 |
+| **v1.0.27** | 2026-10-22 | 修 `RecordVideo` 缺 `fps`：gymnasium 默认 30 fps，而 1 帧 = 1 控制步 = 20 ms，导致录像慢 1.67 倍；`play.py` / `train.py` 现显式传 `fps = 1/step_dt`（50）。实测 200 步 → 视频 4.02 s，播放即真实速度（解决"动画看着比数据慢"） | 无需重训 |
 | 0–3 | 髋关节**位置**目标（相对名义姿态） | `hip_scale = 0.25` rad | 名义 ± `hip_range 0.45` |
 | 4–5 | 轮**速度**目标 | `wheel_scale = 5.0` rad/s | — |
 
@@ -184,7 +242,7 @@
 
 | 项目 | 值 | 可否调整 |
 |---|---|---|
-| 前进速度 `vx*` | **[+0.2, +1.2] m/s**（**仅前进**） | ✅ `INFANTRY_RL_VX_MIN` / `INFANTRY_RL_VX_MAX` |
+| 速度 `vx*` | **[−1.2, +1.2] m/s**（**含倒车**，v1.0.10） | ✅ `INFANTRY_RL_VX_MIN` / `INFANTRY_RL_VX_MAX` |
 | **航向目标** | **固定 0（转弯关闭）** | ✅ `INFANTRY_RL_ENABLE_TURNING=1` 恢复 −π…+π |
 | `wz*` 命令 | `clip(1.5 · wrap(0 − ψ), ±2.5)` | 改 `HEADING_STIFFNESS` / `ANG_VEL_Z_RANGE` |
 | `wz` 的 **±2.5** | **只作为纠正漂移的钳位**，不是转向指令 | 改 `ANG_VEL_Z_RANGE` |
@@ -284,7 +342,7 @@ isaac_ws/
 │   ├── mdp/
 │   │   ├── actions.py           # FiveBarJointAction：6 维动作 → 髋角+轮速+膝目标
 │   │   ├── observations.py      # 10 个观测项
-│   │   └── rewards.py           # 全部自定义奖励项
+│   │   ├── rewards.py           # 全部自定义奖励项
 │   ├── robots/infantry_rl.py    # 执行器、关节名、初始姿态
 │   ├── terrains/                # 本地地面平面（离线，不拉 Nucleus 资产）
 │   └── tasks/
@@ -441,6 +499,4 @@ D:\miniconda\envs\RM\python.exe isaac_ws\scripts\train.py --task Infantry-RL-Loc
 
 | 版本 | 日期 | 一句话 | 是否需重训 |
 |---|---|---|---|
-| **v1.0.8** | 2026-10-22 | **精度跟踪**：`track_lin_vel_x` +6.0→+8.0（std 0.25→0.15）、新增 L1 跟踪项（lin −2.0 / yaw −1.0）、L2 加严（−3.0→−6.0 / −1.0→−2.0）、`track_ang_vel_z` +3.0（std 0.35→0.15）；放宽 `action_jerk` −0.5→−0.3、`wheel_torques` 死区 1.0→1.5 | **必须重训** |
-| **v1.0.7** | 2026-10-22 | 打破"静止不动"局部最优：`track_lin_vel_x` +4.0→+6.0、`track_lin_vel_x_l2` −1.0→−3.0、`track_ang_vel_z` +1.5→+1.0；`entropy_coef` 0.001→0.003、std 下限 0.03→0.06 恢复探索 | **必须重训** |
 | | | | |

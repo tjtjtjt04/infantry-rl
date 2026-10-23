@@ -4,8 +4,9 @@ The cgf classes live in the submodules; the most common terms are re-exported he
 so a task file can simply do ``import isaac_ws_infantry.mdp as mdp``.
 """
 
-from . import actions, observations, rewards  # noqa: F401
+from . import actions, commands, observations, rewards  # noqa: F401
 from .actions import FiveBarJointAction, FiveBarJointActionCfg  # noqa: F401
+from .commands import SpinAwareVelocityCommand, SpinAwareVelocityCommandCfg  # noqa: F401
 from .observations import (  # noqa: F401
     base_height,
     closure_residual,
@@ -61,6 +62,9 @@ from .rewards import (  # noqa: F401
 
 __all__ = [
     "actions",
+    "commands",
+    "SpinAwareVelocityCommand",
+    "SpinAwareVelocityCommandCfg",
     "observations",
     "rewards",
     "FiveBarJointAction",

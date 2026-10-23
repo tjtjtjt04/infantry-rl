@@ -40,12 +40,20 @@ D:\miniconda\envs\RM\python.exe isaac_ws\scripts\play.py --task Infantry-RL-Loco
 | `--num_envs` | 训练用 **1024**（见规则 2） |
 | `--cmd_vx` | 回放时的前进指令，单位 m/s |
 | `--cmd_heading_deg` | 回放时的目标航向，单位度 |
+| **`--cmd_wz`** | **回放时直接给偏航角速度指令（rad/s）**，只对 `yaw_rate` 类 checkpoint 有意义 |
 | `--steps` | 回放跑多少个控制步（50 步 = 1 秒） |
 | `--real-time` | 按真实时间播放（不加则全速跑完就退出） |
 
+**环境变量开关**（必须在跑训练的那个 `cmd` 窗口里 `set`）
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `INFANTRY_RL_VX_MIN` / `INFANTRY_RL_VX_MAX` | `-1.2` / `1.2` | 训练速度范围（m/s），负值是倒车 |
+| `INFANTRY_RL_ENABLE_TURNING` | `0` | 设为 `1` 恢复转弯任务 |
+
 ---
 
-## ⚠️ 五条必须知道的规则
+## ⚠️ 七条必须知道的规则
 
 ### 1. 训练和回放**不能同时跑**
 
@@ -121,6 +129,48 @@ rmdir /s /q "D:\Robomaster\RL\logs\rsl_rl\infantry_rl_locomotion\2026-10-20_11-3
 
 > 同理，测试产生的 `outputs\`（Hydra 配置转储）、临时脚本、`_*.log` 都要一起清掉。
 > **只删测试目录，不要删正式 run。**
+
+---
+
+### 7. 改完代码必须同步两个文档
+
+代码改动之后，**两个文档都要检查**，缺一个就算没改完：
+
+| 文档 | 作用 |
+|---|---|
+| **`VERSION.md`** | 记录"当前是什么配置"（冻结配置 + 变更记录） |
+| **本文件 `TRAINING_GUIDE.md`** | 记录"怎么操作"（指令、参数、行号、示例输出） |
+
+**对照清单**：
+
+| 改了什么 | `VERSION.md` | `TRAINING_GUIDE.md` |
+|---|---|---|
+| 奖励项 / 权重 / `std` | §3.5 | §5 奖励表 |
+| 速度范围 / 训练模式 / `_MODE_PRESETS` | §3.6 | §5「改训练目标」（**含行号**） |
+| PPO 超参 / 网络 / std 限幅 | §3.9 | §5 配置表 |
+| 观测 / 动作维度 | §3.3 / §3.4 | §5 任务表 + 配置表 |
+| 环境变量 | §6 | §0 环境变量表 |
+| 文件增删 / 功能移除 | §4 结构树 + 变更记录 | §8 相关脚本 + 删掉对应章节 |
+| 控制台输出格式 | — | §3.1 示例输出 |
+
+**收尾**：跑一次 1 轮训练，把启动日志和本文档里贴的示例逐字对照：
+
+```
+[cfg] train mode          : STRAIGHT  (...)
+[cfg] derived from TARGETS: wheel_scale 5.01 (动作量程上限 1.36 m/s), track_lin std 0.150 m/s, wheel_spin -3.00e-05
+[cfg] command ranges      : vx [+0.20, +1.20] m/s ..., standing envs 10% (vx=0), wz clamp +/-2.50 rad/s, resample 5-10 s
+[cfg] turning             : DISABLED -- heading TARGET pinned to 0 ...
+```
+
+其中 `[cfg] turning` 一行随模式变化，三种形态：
+
+| 模式 | 打印 |
+|---|---|
+| `straight` / `reverse` / `stand` | `DISABLED -- heading TARGET pinned to 0, the heading loop still cancels yaw drift (straight-line task)` |
+| `turning` / `spin` | `ENABLED -- heading targets sampled in [-pi, pi], wz comes from the heading loop (turn-in-place / turning task)` |
+| **`yaw_rate`** | `wz SAMPLED directly in [-2.0, +2.0] rad/s (heading_command=False, no heading target -- yaw_rate task)` |
+
+对不上就是文档过期了。
 
 ---
 
@@ -231,32 +281,62 @@ tasklist /FI "IMAGENAME eq python.exe"
 
 ### 3.1 前台看（输出直接刷在训练窗口）
 
-每次迭代都会打印一块：
+每次迭代打印一块（v1.0.13 起按"**可对比项同行**"重排）：
 
 ```
-Learning iteration 1200/8000
+##############################################################################
+                            Learning iteration 1200/8000
 
-      Mean reward: -3.42
-      Mean episode length: 1000.00
-      Mean value loss: 0.0213
-      Steps per second: 2712
-      Collection time: 1.520s
-      Learning time: 0.271s
+  reward 152.34             value_loss 0.0213    surrogate -0.0004    entropy 2.7100    action_std 0.18
 
-Episode_Reward/track_lin_vel_x: 0.8421
-Episode_Reward/track_ang_vel_z: 0.7834
-Episode_Reward/roll_straight: -0.0912
-Episode_Reward/pitch: -0.0311
+  vel_x m/s +0.612          cmd +0.703           diff -0.091
+  pitch deg 0.85            roll deg 2.73        yaw deg 0.31
+  error_vel_xy  0.1220      error_vel_yaw  0.3060
+  (error_vel_* = 2x the true mean error)
+
+  time_out  0.9870          bad_orientation  0.0000   base_too_low  0.0000
+
+  action_rate  -0.0002      action_jerk  -0.0404
+  joint_torques  -0.0027    joint_acc  -0.0049
+  wheel_torques  -0.0022    wheel_spin  -0.0000
+  wheel_axle  -0.0061       closure_residual  -0.0000
+  roll_rate  -0.0006        lin_vel_z  -0.0011       lin_vel_y  -0.0002
 ```
 
-重点看这四项：
+### 为什么要"同行对比"
 
-| 指标 | 应该怎样 |
+每一行里的数只有放一起才有意义：
+
+| 行 | 对比什么 | 怎么读 |
+|---|---|---|
+| `vel_x` / `cmd` / `diff` | 实测速度 vs 指令速度 vs 差值 | `diff` 越接近 0 越好；`vel_x` 符号必须和 `cmd` 一致 |
+| `pitch` / `roll` / `yaw` | 三个姿态角 | 直线任务都该 **< 2°（pitch/roll）/ < 5°（yaw）** |
+| `error_vel_xy` / `error_vel_yaw` | 两个跟踪误差 | 同一量级；yaw 天然更难，通常是 xy 的 2~3 倍 |
+| `action_rate` / `action_jerk` | 一阶 / 二阶差分 | 看 `action_jerk`：它就是"腿抖" |
+| `joint_torques` / `joint_acc` | 力矩 / 加速度 | 加速度大 = 关节猛地动 |
+| `wheel_torques` / `wheel_spin` | 轮力矩 / 空转 | 都在逼"用髋不用轮" |
+| `wheel_axle` / `closure_residual` | 轮轴歪斜 / 闭环残差 | 都该接近 0 |
+
+### 关键判据
+
+| 指标 | 目标 |
 |---|---|
-| `Mean reward` | **持续上升** |
-| `Episode_Reward/track_lin_vel_x` | 上升 → 前进指令跟得越来越准 |
-| `Episode_Reward/track_ang_vel_z` | 上升 → 转弯跟得越来越准 |
-| `Episode_Reward/roll_straight` | 从较大的负值逐步接近 0 → 侧倾在改善 |
+| `vel_x` vs `cmd` | 两者接近，`diff` 尽量小 |
+| `pitch deg` / `roll deg` | **< 2°** |
+| `yaw deg` | **< 5°** |
+| `error_vel_xy` / `error_vel_yaw` | **< 0.05**（= 真实 0.025） |
+| `action_std` | 0.15 ~ 0.25 |
+| `time_out` | **≈ 1.0**（没摔） |
+### 被隐藏的项
+
+全部在 TensorBoard 里能看：
+
+```
+Episode_Reward/ 下： alive, fall_penalty, base_height, pitch, roll, roll_straight,
+                    heading_error，以及**所有 track_* 项**
+行：                Run name, Total steps, Steps per second, Collection time,
+                    Learning time, Mean episode length
+```
 
 ### 3.2 TensorBoard 曲线
 
@@ -339,6 +419,33 @@ D:\miniconda\envs\RM\python.exe isaac_ws\scripts\play.py --task Infantry-RL-Loco
 D:\miniconda\envs\RM\python.exe isaac_ws\scripts\play.py --task Infantry-RL-Locomotion-Play-v0 --num_envs 1 --load_run .* --checkpoint model_5000.pt --cmd_vx 0 --cmd_heading_deg 90 --steps 1500 --real-time
 ```
 
+#### 给偏航角速度指令（`--cmd_wz`）
+
+前面两种（`--cmd_vx` / `--cmd_heading_deg`）走的是**航向环**：你给"转到哪个角度"，wz 由控制器算。
+如果想直接给"以多快转"，用 `--cmd_wz`（单位 rad/s，正值=俯视逆时针）：
+
+```cmd
+D:\miniconda\envs\RM\python.exe isaac_ws\scripts\play.py --task Infantry-RL-Locomotion-Play-v0 --num_envs 1 --load_run .* --use_last_checkpoint --cmd_wz 1.0 --steps 2000 --headless
+```
+
+输出会明确提示已绕过航向环：
+
+```
+[play] fixed command: vx=0.0 m/s, wz=+1.00 rad/s (+57.3 deg/s) -- heading loop BYPASSED (use this on a yaw_rate checkpoint)
+```
+
+| 要点 | 说明 |
+|---|---|
+| **只对 `yaw_rate` 训练的 checkpoint 有意义** | 其它模式训练时 wz 是航向环算出来的，直接喂固定 wz 属于分布外输入 |
+| `--cmd_heading_deg` 会被忽略 | 两者互斥，`--cmd_wz` 优先 |
+| 可以和 `--cmd_vx` 一起用 | 例如边走边转：`--cmd_vx 0.5 --cmd_wz 0.5` |
+| 单位换算 | `--cmd_wz 1.0` = 57.3 °/s；想 90°/s 就写 `1.57` |
+
+> 顺带修掉一个旧问题：`--cmd_vx` / `--cmd_heading_deg` 以前**只能维持一个指令窗口**
+> （5~10 s 后命令项会重新采样把固定值覆盖掉），现在固定指令会一直保持到结束。
+
+---
+
 ### 4.3 `--checkpoint` 三种写法
 
 ```cmd
@@ -362,7 +469,8 @@ D:\miniconda\envs\RM\python.exe isaac_ws\scripts\play.py --task Infantry-RL-Loco
 [play] step   50  base_z=0.1905  x=+0.152m y=+0.003m vx=+0.298m/s  heading=  -0.51 deg ...
 
 [play] steps=3000  base_z mean=0.1898 m  max closure residual=9.7e-04 m
-[play] heading: net turn=-1.10 deg  max |deviation|=1.29 deg  mean |yaw rate|=0.148 rad/s
+[play] heading: net turn=-1.1 deg over 60.00s -> NET rate=-0.0 deg/s (-0.000 rad/s)  max |deviation|=1.29 deg
+[play] yaw rate: mean|body_z|=0.148 rad/s  mean body_z=-0.002  mean world_z=-0.002 rad/s
 [play] attitude: mean |pitch|=1.23 deg (max 3.10)  mean |roll|=2.05 deg (max 5.40)
 [play] position: net displacement=(+8.950, +0.002) m  max |x|=8.950 m  mean |vx|=0.298 m/s
 ```
@@ -374,8 +482,90 @@ D:\miniconda\envs\RM\python.exe isaac_ws\scripts\play.py --task Infantry-RL-Loco
 | `net displacement` 的 x | 净位移 | 直行时应**持续增大** |
 | `mean \|roll\|` | 侧倾角 | 直行时应 **< 5°**（这是之前"斜着走"问题的关键指标） |
 | `mean \|pitch\|` | 俯仰角 | 应 **< 5°** |
-| `net turn` | 航向净变化 | 目标 0° 时应**接近 0** |
+| **`net turn`** | **真实累计转角**（逐点累加 wrap 增量，转多圈也对） | 目标 0° 时应**接近 0** |
+| **`NET rate`** | **净转速 = 累计转角 / 时长** | ⭐ **判断"到底转多快"只看这一项** |
+| `mean \|body_z\|` | 机体系偏航角速度**取绝对值**再平均 | 会被来回摆动放大，**不能**当净转速 |
 | `closure_max` | 五连杆闭环残差 | **< 1e-3 m** 说明闭环控制正常 |
+
+#### ⚠️ 三个 yaw 数字别混用（v1.0.25 修正）
+
+回放结束会打印两行 yaw 统计：
+
+```
+[play] heading: net turn=+1466.2 deg over 10.00s -> NET rate=+146.6 deg/s (+2.559 rad/s)
+[play] yaw rate: mean|body_z|=2.744 rad/s  mean body_z=+2.744  mean world_z=+2.744 rad/s
+```
+
+| 数字 | 含义 | 什么时候看 |
+|---|---|---|
+| **`NET rate`** | **净转速** = 累计转角 ÷ 时长 | ⭐ **判断"是否达到指令角速度"只看这个** |
+| `mean \|body_z\|` | 每步偏航角速度**取绝对值**再平均 | 会被正负摆动放大 |
+| `mean body_z` / `world_z` | 带符号平均 | 有正负抵消，能看出是否单向旋转 |
+
+**`NET rate` 与 `mean |body_z|` 差距大 = 机器人在来回抖**（转过去又转回来），
+原地转训练早期很常见。
+
+> **v1.0.25 修复的 bug**：旧版 `net turn` 用 `heading[末] − heading[首]`，
+> 而 heading 已 wrap 到 (−180°, +180°]，**转过半圈以上就完全错**。
+> 实测：机器人转了 4 圈（1466°），旧代码报 `net turn=+26°`。
+> 现在改为逐点累加 wrap 增量，转多少圈都对。
+
+**为什么"动画看起来没转那么快"**：
+
+| 原因 | 处理 |
+|---|---|---|
+| **回放循环本身跑不到实时**（最主要） | 看日志里的 `playback N% of real time`，见下 |
+| 4 腿对称结构高速旋转时渲染会**频闪**（stroboscopic） | 用 `--cmd_wz 0.5` 慢速对比 |
+| 指令超出训练范围（训练 ±2.0 却给 3.0）→ 策略饱和，实际约 2.56 | 看 `NET rate` 与指令的比值 |
+
+#### ⭐ 关键：`--real-time` 不能把慢的变快
+
+`--real-time` 的作用是**跑太快时 sleep 一下压到实时**；如果循环本来就比实时慢，
+它**什么也做不了**（没有负 sleep）。
+
+v1.0.26 起回放结束会打印实际播放速率：
+
+```
+[play] timing: sim=6.00s  wall=9.83s  -> playback 61% of real time  (动画里的转速 = NET rate x 0.61)
+```
+
+**实测（1 环境 + headless + `--real-time`）**：
+
+| 项 | 值 |
+|---|---|
+| 仿真时间 | 6.00 s |
+| 墙钟时间 | 9.83 s |
+| **播放速率** | **61% of real time** |
+| 指令 wz | 3.0 rad/s |
+| 仿真里的净转速 | **2.553 rad/s**（85%，正确） |
+| **眼睛看到的转速** | 2.553 × 0.61 ≈ **1.56 rad/s** |
+
+开着渲染窗口会更慢（<61%），所以看起来更"没转起来"。
+
+**为什么跑不到实时**：单环境时每一步的固定开销（~150 次 CUDA kernel 发射 + 4 次物理子步
++ 五连杆牛顿解算）无法被摊薄。训练时 1024 个环境能摊薄，单环境摊不薄。
+
+**三种解法，按推荐顺序**：
+
+| 方案 | 命令 | 说明 |
+|---|---|---|
+| **① 录视频再看**（推荐） | `--video --video_length 200` | 视频按 **50 fps** 录制（v1.0.27 修正，原先默认 30 fps 会慢 1.67 倍），**播放就是真实速度** |
+| ② 只看数字 | 不加 `--real-time` | `NET rate` 就是真转速，不受播放速度影响 |
+| ③ 慢指令对比 | `--cmd_wz 0.5` | 低速时失真不明显，便于肉眼确认方向 |
+
+**录视频实测**（`--cmd_wz 3.0 --steps 210 --video --video_length 200`）：
+
+```
+[play] timing: sim=4.20s  wall=22.89s  -> playback 18% of real time
+[play] heading: net turn=+612.6 deg over 4.20s -> NET rate=+145.9 deg/s (+2.546 rad/s)
+```
+
+生成 `rl-video-step-0.mp4`：**200 个控制步 → 视频时长 4.02 s**（= 200 × 20 ms）✅
+录的时候很慢（18%），但**视频本身按真实速度播放**，用播放器看就是正确的转速。
+
+> **v1.0.27 修正**：`play.py` / `train.py` 的 `RecordVideo` 原先没传 `fps`，
+> gymnasium 默认 30 fps，而 1 帧 = 1 控制步 = 20 ms → 视频会**慢 1.67 倍**。
+> 现在显式传 `fps = 1/step_dt = 50`。
 
 ### 4.5 无头模式快速评估（不开窗口，快）
 
@@ -410,6 +600,159 @@ D:\miniconda\envs\RM\python.exe isaac_ws\scripts\play.py --task Infantry-RL-Loco
 
 > Locomotion 和 Balance 的观测维度不同，**checkpoint 不能互相加载**。
 
+### 改训练目标：只改一个值
+
+**文件**：`isaac_ws\isaac_ws_infantry\tasks\locomotion\locomotion_env_cfg.py`
+**全部配置都在文件前 260 行**，从上到下：
+
+| 行 | 内容 | 要不要改 |
+|---|---|---|
+| L74–116 | **速度相关常数**（`REF_MAX_VX` / `WHEEL_RADIUS` / `CLIP_ACTIONS` / `ACTION_HEADROOM`） | 一般不用 |
+| L119–199 | **七种模式的完整注释** | 参考 |
+| **L199** | **`TRAIN_MODE = "straight"`** | ✅ **选模式改这行** |
+| **L202–263** | **★★★ 速度指令表 `_MODE_PRESETS` ★★★**（数字在 L221–263） | ✅ **改速度数字改这里** |
+| L259–261 | 模式校验 | 不用 |
+| L264–372 | 环境变量覆盖 + `LocomotionTargets` 数据类（**无默认值**） | 不用 |
+| L373–392 | `TARGETS`（由上面自动生成）+ 兼容别名 | 不用 |
+| L394+ | 命令/观测/奖励/终止/环境等 MDP 配置 | 按需 |
+
+> **所有速度数字只在 `_MODE_PRESETS` 一张表里出现。**
+> `LocomotionTargets` 数据类**故意不给任何默认值** —— 那里没有数字可改，
+> 改到那里也不会生效。
+
+### 速度指令表长什么样（L221–263）
+
+```
+#             模式名        vx (m/s)        vy       wz (rad/s)   转弯  航向环  增益   保持(s)      站立   航向环境
+_MODE_PRESETS: dict[str, dict] = {
+    "straight": dict(
+        vx_min=0.2,   vx_max=1.2,   vy_min=0.0, vy_max=0.0, wz_min=-2.5, wz_max=2.5,
+        enable_turning=False, heading_command=True,  heading_stiffness=1.5,
+        resample_time_s=(5.0, 10.0), rel_standing_envs=0.1, rel_heading_envs=1.0,
+    ),
+    "turning": dict(
+        vx_min=0.2,   vx_max=1.0,   vy_min=0.0, vy_max=0.0, wz_min=-2.5, wz_max=2.5,
+        enable_turning=True,  heading_command=True,  heading_stiffness=1.5,
+        resample_time_s=(3.0, 6.0),  rel_standing_envs=0.1, rel_heading_envs=1.0,
+    ),
+    "spin": dict(
+        vx_min=0.0,   vx_max=0.0,   vy_min=0.0, vy_max=0.0, wz_min=-2.0, wz_max=2.0,
+        enable_turning=True,  heading_command=True,  heading_stiffness=2.0,
+        resample_time_s=(2.0, 4.0),  rel_standing_envs=0.0, rel_heading_envs=1.0,
+    ),
+    "yaw_rate": dict(
+        vx_min=0.0,   vx_max=0.0,   vy_min=0.0, vy_max=0.0, wz_min=-2.0, wz_max=2.0,
+        enable_turning=False, heading_command=False, heading_stiffness=1.5,
+        resample_time_s=(2.0, 4.0),  rel_standing_envs=0.0, rel_heading_envs=1.0,
+    ),
+    "reverse": dict(
+        vx_min=-1.2,  vx_max=1.2,   vy_min=0.0, vy_max=0.0, wz_min=-2.5, wz_max=2.5,
+        enable_turning=False, heading_command=True,  heading_stiffness=1.5,
+        resample_time_s=(5.0, 10.0), rel_standing_envs=0.1, rel_heading_envs=1.0,
+    ),
+    "stand": dict(
+        vx_min=0.0,   vx_max=0.0,   vy_min=0.0, vy_max=0.0, wz_min=-2.5, wz_max=2.5,
+        enable_turning=False, heading_command=True,  heading_stiffness=1.5,
+        resample_time_s=(5.0, 10.0), rel_standing_envs=1.0, rel_heading_envs=1.0,
+    ),
+}
+```
+
+**字段含义**：
+
+| 字段 | 含义 |
+|---|---|
+| `vx_min` / `vx_max` | 前进速度范围（m/s），**负值 = 倒车** |
+| `vy_min` / `vy_max` | 侧向速度（差速轮无侧向执行器 → 恒为 0） |
+| `wz_min` / `wz_max` | 偏航角速度（rad/s）。`heading_command=True` 时是**钳位**，`False` 时是**采样范围** |
+| `enable_turning` | 航向目标是否随机采样 `[-π, π]`（False = 锁定 0） |
+| `heading_command` | True = wz 由航向差算出（闭环转到目标角）；False = wz 直接采样（按指令角速度转） |
+| `heading_stiffness` | 航向误差 → 偏航角速度增益（1/s） |
+| `resample_time_s` | 指令保持时间（s） |
+| `rel_standing_envs` | 站立环境比例（整条指令清零，用于学刹车） |
+| `rel_heading_envs` | 航向环境比例（通常 1.0） |
+
+### 七种模式一览
+
+| `TRAIN_MODE` | 训练什么 | vx | 航向 / wz | 保持 | 站立 |
+|---|---|---|---|---|---|
+| **`"straight"`**（默认） | 直线速度跟踪 | `[0.2, 1.2]` | 锁定 0 | 5–10 s | 10% |
+| **`"turning"`** | 边跑边转 | `[0.2, 1.0]` | 航向随机 `[-π, π]` | 3–6 s | 10% |
+| **`"spin"`** | 原地转到指定航向 | `[0, 0]` | 航向随机，增益 2.0，钳位 ±2.0 | 2–4 s | 0% |
+| **`"yaw_rate"`** | 原地按角速度旋转 | `[0, 0]` | wz 直接采样 `±2.0` | 2–4 s | 0% |
+| `"reverse"` | 前进 + 倒车 | `[-1.2, 1.2]` | 锁定 0 | 5–10 s | 10% |
+| `"stand"` | 原地站住 | `[0, 0]` | 锁定 0 | 5–10 s | 100% |
+| **`"full"`** | **全部技能合成** | `[-1.2, 1.2]` | 航向随机 + **20% 原地旋转** | 3–6 s | 10% |
+
+### `"full"` 模式：一次训完所有技能
+
+上面的模式各训一种能力，**`"full"` 把 5 种指令混在同一个任务里**：
+
+| 环境占比 | 收到什么指令 | 学到什么 |
+|---|---|---|
+| **70%** | `vx ∈ [-1.2, 1.2]` + 航向随机 | 前进、倒车、边跑边转 |
+| **20%** | `vx = 0`（强制）+ 航向随机 | **原地旋转** |
+| **10%** | 全部清零 | 站住 / 刹车 |
+
+**为什么需要专门的"原地旋转样本"**：
+
+`UniformVelocityCommand` 只在 `vx` 区间里**均匀采样**。即使区间是 `[-1.2, 1.2]`，
+采到 `|vx| < 0.05` 的概率只有 4% —— 这么少的样本学不出"原地转"。
+所以新增了 `SpinAwareVelocityCommand`（`mdp/commands.py`）：
+
+```python
+class SpinAwareVelocityCommand(UniformVelocityCommand):
+    # 对 rel_spin_envs 比例的环境：保留航向环算出的 wz，但把 vx 强制为 0
+```
+
+对应预设字段是 **`rel_spin_envs`**（默认 `0.0`，其它模式行为完全不变，已实测）。
+
+**启动日志**（`full` 模式实测）：
+
+```
+[cfg] command ranges : vx [-1.20, +1.20] m/s ..., standing envs 10% (vx=0), spin envs 20% (vx=0, wz kept), wz clamp +/-2.50 rad/s, resample 3-6 s
+```
+
+其它模式这一项是 `spin envs 0%`。
+
+**`full` 模式不包含 `yaw_rate` 能力** —— 那是 `heading_command=False`（直接采样角速度），
+和"跟踪随机航向"互斥，无法在同一个命令项里共存。
+
+**什么时候用**：
+
+| 情况 | 建议 |
+|---|---|
+| 想让**一个策略全都会**（前进/倒车/转弯/原地转/站住） | ✅ 用 `full` 从头训 |
+| 只要某一项能力 | 用单项模式，收敛更快更准 |
+| 想加"匀速转"能力 | 单项模式先训，再切 `full` 续训 |
+
+**能否续训**：`full` 的动作尺度是 **5.01**，与 `straight`/`turning`/`reverse` 一致 → **可以 `--resume`**。
+
+---
+
+### 速度 → 动作的自动换算（不用管）
+
+顶部 L74–116 的四个常数决定下面三条公式，改速度表后自动重算：
+
+```
+wheel_scale       = max(REF_MAX_VX, |vx|max) / (WHEEL_RADIUS × CLIP_ACTIONS × ACTION_HEADROOM)
+track_lin_std     = 0.125 × max(REF_MAX_VX, |vx|max)
+wheel_spin_weight = −3e-5 × (REF_MAX_VX / max(REF_MAX_VX, |vx|max))²
+```
+
+`wheel_scale` 若不跟着算：速度目标提高后所需轮速会超过动作量程，**机器人跑不到目标速度且不报错**，看起来只是"学不会"。
+
+**启动日志核对**：
+
+```
+[cfg] derived from TARGETS: wheel_scale 5.01 (动作量程上限 1.36 m/s), track_lin std 0.150 m/s, wheel_spin -3.00e-05
+[cfg] command ranges      : vx [+0.20, +1.20] m/s ..., standing envs 10% (vx=0), wz clamp +/-2.50 rad/s, resample 5-10 s
+```
+
+**`wheel_scale` 必须是 5.01**：等于它 → 动作尺度与之前一致，可以 `--resume`；不等于 → 速度目标超过 1.2，旧 checkpoint 作废。
+
+---
+
 ### 当前 Locomotion 配置
 
 | 项目 | 值 |
@@ -427,16 +770,17 @@ D:\miniconda\envs\RM\python.exe isaac_ws\scripts\play.py --task Infantry-RL-Loco
 | 每轮耗时 | 约 **1.9~2.0 s** |
 | 闭环求解 | 解析雅可比 + 2 次牛顿迭代 |
 
-**指令范围（v1.0.4 起是"纯直线"模式）**：
+**指令范围（v1.0.10：直线 + 倒车）**：
 
 | 项目 | 值 | 说明 |
 |---|---|---|
-| `vx` 前进速度 | **[+0.2, +1.2] m/s** | 可用 `INFANTRY_RL_VX_MIN` / `INFANTRY_RL_VX_MAX` 改 |
+| `vx` 速度 | **[−1.2, +1.2] m/s**（含倒车） | 可用 `INFANTRY_RL_VX_MIN` / `INFANTRY_RL_VX_MAX` 改 |
 | 航向目标 | **固定 0** | 转弯已关闭 |
 | `wz` 实际命令 | `clip(1.5 × wrap(0 − ψ), ±2.5)` | **只用于纠正航向漂移**，不主动转弯 |
 
-> 想要回转弯能力：`set INFANTRY_RL_ENABLE_TURNING=1`，航向目标恢复随机采样 −π~+π。
-> 启动日志会打印 `[cfg] turning : DISABLED / ENABLED`。
+> 想要转弯能力：把 `TRAIN_MODE` 改成 `"turning"`（见 §5「改训练目标」），
+> 或临时 `set INFANTRY_RL_ENABLE_TURNING=1` 让航向目标恢复随机采样 −π~+π。
+> 启动日志 `[cfg] turning` 会按模式打印三种形态之一（锁定 0 / 航向随机 / wz 直接采样）。
 
 ⚠️ **直线模式下不要用 `--cmd_heading_deg` 测试转弯** —— 那是训练分布外的输入。
 

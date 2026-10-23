@@ -69,6 +69,17 @@ parser.add_argument(
     default=None,
     help="Velocity-tracking tasks only: hold this heading command (degrees). Defaults to 0 when --cmd_vx is given.",
 )
+parser.add_argument(
+    "--cmd_wz",
+    type=float,
+    default=None,
+    help=(
+        "Yaw-rate tasks only (heading_command=False, e.g. TRAIN_MODE='yaw_rate'): hold this "
+        "yaw-rate command in rad/s, e.g. --cmd_wz 1.0 rotates left at 1 rad/s. When given, the "
+        "heading loop is bypassed and wz is fed straight to the policy. Positive = counter-clockwise "
+        "(viewed from above). --cmd_heading_deg is ignored in that case."
+    ),
+)
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
@@ -227,6 +238,9 @@ def main(env_cfg, agent_cfg: RslRlBaseRunnerCfg):
             "step_trigger": lambda step: step == 0,
             "video_length": args_cli.video_length,
             "disable_logger": True,
+            # 1 帧 = 1 个控制步 = 20 ms -> 50 fps 才是真实速度。
+            # gymnasium 的 RecordVideo 默认 30 fps，会让回放看起来慢 1.67 倍。
+            "fps": round(1.0 / float(env.unwrapped.step_dt)),
         }
         print("[INFO] Recording videos during play.")
         print_dict(video_kwargs, nesting=4)
@@ -243,7 +257,8 @@ def main(env_cfg, agent_cfg: RslRlBaseRunnerCfg):
     residuals = []
     heights = []
     headings = []
-    yaw_rates = []
+    yaw_rates = []          # 机体系 z（与指令 wz 同坐标系）
+    yaw_rates_world = []    # 世界系 z（仅交叉检查）
     rolls = []
     pitches = []
     hip_devs = []
@@ -266,27 +281,47 @@ def main(env_cfg, agent_cfg: RslRlBaseRunnerCfg):
     # created, so two runs of the same checkpoint are not comparable.  Pinning the
     # command makes the numbers reproducible (and lets us test "drive straight").
     # ------------------------------------------------------------------ #
-    fixed_cmd = args_cli.cmd_vx is not None or args_cli.cmd_heading_deg is not None
+    fixed_cmd = (
+        args_cli.cmd_vx is not None
+        or args_cli.cmd_heading_deg is not None
+        or args_cli.cmd_wz is not None
+    )
 
     def _apply_fixed_cmd(term) -> None:
-        term.is_heading_env[:] = True  # heading controller owns wz
         term.is_standing_env[:] = False  # do not let it zero our command
         term.vel_command_b[:] = 0.0
-        term.heading_target[:] = math.radians(args_cli.cmd_heading_deg or 0.0)
+        if args_cli.cmd_wz is not None:
+            # Direct yaw-rate command: bypass the heading loop entirely.  ``_update_command``
+            # only writes wz for heading envs, so clearing the flag keeps our value.
+            term.is_heading_env[:] = False
+            term.vel_command_b[:, 2] = args_cli.cmd_wz
+        else:
+            term.is_heading_env[:] = True  # heading controller owns wz
+            term.heading_target[:] = math.radians(args_cli.cmd_heading_deg or 0.0)
         if args_cli.cmd_vx is not None:
             term.vel_command_b[:, 0] = args_cli.cmd_vx
+        # Never let the term resample over the pinned command (otherwise it only lasts one
+        # resampling window, which made two runs of the same checkpoint incomparable).
+        term.time_left[:] = 1.0e9
 
     if fixed_cmd:
         try:
             _cmd_term = env.unwrapped.command_manager.get_term("base_velocity")
             _apply_fixed_cmd(_cmd_term)
-            print(
-                f"[play] fixed command: vx={args_cli.cmd_vx} m/s, "
-                f"heading={args_cli.cmd_heading_deg or 0.0:.1f} deg "
-                f"(wz is derived from the heading error every step)"
-            )
+            if args_cli.cmd_wz is not None:
+                print(
+                    f"[play] fixed command: vx={args_cli.cmd_vx or 0.0} m/s, "
+                    f"wz={args_cli.cmd_wz:+.2f} rad/s ({math.degrees(args_cli.cmd_wz):+.1f} deg/s) "
+                    f"-- heading loop BYPASSED (use this on a yaw_rate checkpoint)"
+                )
+            else:
+                print(
+                    f"[play] fixed command: vx={args_cli.cmd_vx} m/s, "
+                    f"heading={args_cli.cmd_heading_deg or 0.0:.1f} deg "
+                    f"(wz is derived from the heading error every step)"
+                )
         except (AttributeError, KeyError, ValueError):
-            print("[play] --cmd_vx/--cmd_heading_deg ignored: this task has no 'base_velocity' command")
+            print("[play] --cmd_vx/--cmd_heading_deg/--cmd_wz ignored: this task has no 'base_velocity' command")
             fixed_cmd = False
 
     def _yaw():
@@ -332,6 +367,7 @@ def main(env_cfg, agent_cfg: RslRlBaseRunnerCfg):
         dl0 = 0.5 * (abs(float(rate[0])) + abs(float(rate[2])))
         return float(hip_dev), phi, l0_span, dphi, dl0
 
+    _wall_t0 = time.perf_counter()
     for step in range(steps):
         start_time = time.time()
         with torch.inference_mode():
@@ -344,7 +380,9 @@ def main(env_cfg, agent_cfg: RslRlBaseRunnerCfg):
         residuals.append(env.unwrapped.max_closure_residual)
         heights.append(float(robot.data.root_pos_w[:, 2].mean().item()))
         headings.append(_yaw())
-        yaw_rates.append(float(robot.data.root_ang_vel_w[:, 2].mean().item()))
+        # 指令 wz 是 BODY frame 的偏航角速度，所以统计也用它；世界系 z 另存一份做交叉检查
+        yaw_rates.append(float(robot.data.root_ang_vel_b[:, 2].mean().item()))
+        yaw_rates_world.append(float(robot.data.root_ang_vel_w[:, 2].mean().item()))
         _roll, _pitch = _roll_pitch()
         rolls.append(_roll)
         pitches.append(_pitch)
@@ -368,7 +406,7 @@ def main(env_cfg, agent_cfg: RslRlBaseRunnerCfg):
                 f"[play] step {step:4d}  base_z={heights[-1]:.4f}  "
                 f"x={xs[-1]:+6.3f}m y={ys[-1]:+6.3f}m vx={vxs[-1]:+6.3f}m/s  "
                 f"heading={math.degrees(headings[-1]):+7.2f} deg  "
-                f"yaw_rate={yaw_rates[-1]:+.3f} rad/s  "
+                f"yaw_rate(body)={yaw_rates[-1]:+.3f} rad/s  "
                 f"closure_max={residuals[-1]:.3e} m",
                 flush=True,
             )
@@ -381,8 +419,8 @@ def main(env_cfg, agent_cfg: RslRlBaseRunnerCfg):
                     f"  heading_delta={float(term.heading_delta[0]):+.2f}"
                     f"  speed_delta={float(getattr(term, 'speed_delta', torch.zeros(1))[0]):+.2f}"
                     f"  actual wheel vel={[round(float(v), 2) for v in wv]}"
-                    f"\n       [dbg] yaw_rate(world_z)={yaw_rates[-1]:+.4f}"
-                    f"  yaw_rate(body_z)={float(robot.data.root_ang_vel_b[0, 2]):+.4f}"
+                    f"\n       [dbg] yaw_rate(body_z)={yaw_rates[-1]:+.4f}"
+                    f"  yaw_rate(world_z)={yaw_rates_world[-1]:+.4f}"
                     f"  yaw_rate(finite diff)={fd:+.4f} rad/s"
                     f"  heading_control={term.cfg.heading_control}"
                     f"  position_control={getattr(term.cfg, 'position_control', False)}",
@@ -398,7 +436,22 @@ def main(env_cfg, agent_cfg: RslRlBaseRunnerCfg):
     def _wrap(a: float) -> float:
         return (a + math.pi) % (2.0 * math.pi) - math.pi
 
-    total_turn = math.degrees(headings[-1] - headings[0])
+    # 真实累计转角：逐采样点累加 wrap 后的增量。
+    # 旧代码用 headings[-1] - headings[0] 且 heading 已被 wrap 到 (-pi, pi]，
+    # 所以只要机器人转了半圈以上这个数就完全错了（原地转一圈就归零）。
+    def _dw(a: float) -> float:
+        return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+    turn_acc = 0.0
+    for _k in range(1, len(headings)):
+        turn_acc += _dw(headings[_k] - headings[_k - 1])
+    total_turn = math.degrees(turn_acc)
+    _duration = max(1e-9, len(headings) * float(env.unwrapped.step_dt))
+    # 墙钟时间 vs 仿真时间：这个比值决定动画看起来是快是慢
+    _wall = max(1e-9, time.perf_counter() - _wall_t0)
+    _rt = _duration / _wall
+    net_rate_deg = total_turn / _duration
+    net_rate_rad = turn_acc / _duration
     max_dev = math.degrees(max(abs(_wrap(h - headings[0])) for h in headings))
     n = max(1, len(rolls))
     mean_roll = math.degrees(sum(abs(v) for v in rolls) / n)
@@ -420,10 +473,17 @@ def main(env_cfg, agent_cfg: RslRlBaseRunnerCfg):
     max_axle = 1000.0 * (max(axle_skew) if axle_skew else 0.0)
 
     print(
+        f"[play] timing: sim={_duration:.2f}s  wall={_wall:.2f}s  -> playback {_rt:.0%} of real time"
+        f"  (动画里的转速 = NET rate x {_rt:.2f})\n"
         f"[play] steps={steps}  base_z mean={sum(heights) / len(heights):.4f} m  "
         f"max closure residual={max(residuals):.3e} m\n"
-        f"[play] heading: net turn={total_turn:+.2f} deg  max |deviation|={max_dev:.2f} deg  "
-        f"mean |yaw rate|={sum(abs(v) for v in yaw_rates) / max(1, len(yaw_rates)):.3f} rad/s\n"
+        f"[play] heading: net turn={total_turn:+.1f} deg over {_duration:.2f}s "
+        f"-> NET rate={net_rate_deg:+.1f} deg/s ({net_rate_rad:+.3f} rad/s)  "
+        f"max |deviation|={max_dev:.2f} deg\n"
+        f"[play] yaw rate: mean|body_z|={sum(abs(v) for v in yaw_rates) / max(1, len(yaw_rates)):.3f} rad/s  "
+        f"mean body_z={sum(yaw_rates) / max(1, len(yaw_rates)):+.3f}  "
+        f"mean world_z={sum(yaw_rates_world) / max(1, len(yaw_rates_world)):+.3f} rad/s\n"
+        f"       (net rate 才是真的转了多少；mean|body_z| 会被来回摆动放大 -- 两者差距大说明在抖)\n"
         f"[play] attitude: mean |pitch|={mean_pitch:.2f} deg (max {max_pitch:.2f})  "
         f"mean |roll|={mean_roll:.2f} deg (max {max_roll:.2f})\n"
         f"[play] legs: mean |hip dev|={mean_hip_dev:.2f} deg (max {max_hip_dev:.2f})  "

@@ -353,6 +353,9 @@ def _clamp_policy_std(runner, low: float = 0.06, high: float = 0.4) -> None:
 #: Reward terms whose per-iteration console line is dropped (TensorBoard keeps them).
 #: Listed by NAME, in the order of ``LocomotionRewardsCfg``; the numbers in the comment
 #: are the positions in the "Active Reward Terms" table printed at startup.
+#: Every ``track_*`` term is hidden as well (see ``_print_console_block``): the tracking
+#: quality is reported instead by the live ``vel_x`` / ``pitch_deg`` / ``yaw_deg`` lines
+#: and by ``error_vel_xy`` / ``error_vel_yaw``.
 HIDDEN_CONSOLE_TERMS = (
     "alive",  # 1
     "fall_penalty",  # 2
@@ -360,16 +363,61 @@ HIDDEN_CONSOLE_TERMS = (
     "pitch",  # 4
     "roll",  # 5
     "roll_straight",  # 6
-    "track_lin_vel_x",  # 9
     "heading_error",  # 11
 )
 
 
-def _print_console_block(logger, kwargs, snapshots, hidden: set[str]) -> None:
-    """Reprint rsl_rl's iteration block minus the hidden terms, with bare names.
+def _live_state(env) -> dict[str, float] | None:
+    """Physical state straight from the simulator: base x velocity and roll/pitch/yaw.
 
-    rsl_rl prints ``Episode_Reward/<name>``, ``Metrics/base_velocity/<name>`` and
-    ``Episode_Termination/<name>``; only the last path component is kept here.
+    The reward terms only expose the *errors*; these are the quantities the errors are
+    computed FROM, which is what makes the console readable at a glance.
+    """
+    try:
+        from isaaclab.utils.math import euler_xyz_from_quat
+
+        unwrapped = env.unwrapped
+        asset = unwrapped.scene["robot"]
+        vel = asset.data.root_lin_vel_b[:, 0]
+        cmd = unwrapped.command_manager.get_command("base_velocity")[:, 0]
+        roll, pitch, yaw = euler_xyz_from_quat(asset.data.root_quat_w)
+        rad2deg = 180.0 / 3.141592653589793
+        return {
+            "vel_x": float(vel.mean()),
+            "vel_x_cmd": float(cmd.mean()),
+            "roll_deg": float(roll.abs().mean()) * rad2deg,
+            "pitch_deg": float(pitch.abs().mean()) * rad2deg,
+            "yaw_deg": float(yaw.abs().mean()) * rad2deg,
+        }
+    except Exception:  # noqa: BLE001 - diagnostics must never break training
+        return None
+
+
+#: Console layout.  Everything a reader has to COMPARE sits on one line; only quantities
+#: that are read on their own keep a line of their own.
+#:   (group title, ((label, bare-name, format), ...))
+_CONSOLE_GROUPS = (
+    (
+        "",
+        (
+            ("reward", "Mean reward", "{}"),
+            ("value_loss", "Mean value", "{:.4f}"),
+            ("surrogate", "Mean surrogate", "{:+.4f}"),
+            ("entropy", "Mean entropy", "{:.4f}"),
+            ("action_std", "Mean action std", "{:.2f}"),
+        ),
+    ),
+    ("terminate", (("time_out", "time_out", "{:.4f}"), ("bad_orient", "bad_orientation", "{:.4f}"),
+                   ("too_low", "base_too_low", "{:.4f}"))),
+)
+
+
+def _print_console_block(logger, kwargs, snapshots, hidden: set[str], live: dict[str, float] | None = None) -> None:
+    """Print the iteration block, grouping the values that have to be compared.
+
+    rsl_rl prints one line per term, which splits pairs that only mean something together
+    (``vel_x`` vs its command, ``error_vel_xy`` vs ``error_vel_yaw``, pitch vs roll vs yaw).
+    Here every comparable pair is emitted on ONE line.  TensorBoard still gets everything.
     """
     def mean_of(key: str) -> float | None:
         values = []
@@ -380,34 +428,78 @@ def _print_console_block(logger, kwargs, snapshots, hidden: set[str]) -> None:
                 values.append(float(v.mean()) if hasattr(v, "mean") else float(v))
         return sum(values) / len(values) if values else None
 
-    def line(label: str, value: str, pad: int = 30) -> str:
-        return f"{label + ':':>{pad}} {value}\n"
+    # ---- collect every term that survived the filter ----------------------
+    keys: list[str] = []
+    for snap in snapshots:
+        for key in snap:
+            if key not in keys:
+                keys.append(key)
+    values: dict[str, float] = {}
+    for key in keys:
+        bare = key.rsplit("/", 1)[-1]
+        if bare in hidden or bare.startswith("track_"):
+            continue
+        v = mean_of(key)
+        if v is not None:
+            values[bare] = v
 
-    body = "\n" + "#" * 78 + "\n"
-    body += f"{'Learning iteration ' + str(kwargs.get('it', 0)) + '/' + str(kwargs.get('total_it', 0)):^78}\n\n"
+    def row(*cells: tuple[str, str], width: int = 26) -> str:
+        return "  " + "".join(f"{f'{label} {value}':<{width}}" for label, value in cells).rstrip() + "\n"
 
+    def cell(label: str, fmt: str, width: int) -> tuple[str, str]:
+        v = values.pop(label, None)
+        return (label, "  n/a" if v is None else " " + fmt.format(v))
+
+    out = "\n" + "#" * 78 + "\n"
+    out += f"{'Learning iteration ' + str(kwargs.get('it', 0)) + '/' + str(kwargs.get('total_it', 0)):^78}\n\n"
+
+    # ---- training summary ------------------------------------------------
     rewbuf = getattr(logger, "rewbuffer", None)
     std = kwargs.get("action_std")
     std = float(std.mean()) if std is not None else float("nan")
+    losses = {k: float(v) for k, v in (kwargs.get("loss_dict") or {}).items()}
+    out += row(
+        ("reward", f"{sum(rewbuf) / len(rewbuf):.2f}" if rewbuf else "n/a"),
+        ("value_loss", f"{losses.get('value', float('nan')):.4f}"),
+        ("surrogate", f"{losses.get('surrogate', float('nan')):+.4f}"),
+        ("entropy", f"{losses.get('entropy', float('nan')):.4f}"),
+        ("action_std", f"{std:.2f}"),
+    )
 
-    for key, value in (kwargs.get("loss_dict") or {}).items():
-        body += line(f"Mean {key} loss", f"{float(value):.4f}")
-    body += line("Mean reward", f"{sum(rewbuf) / len(rewbuf):.2f}" if rewbuf else "n/a")
-    body += line("Mean action std", f"{std:.2f}")
+    # ---- the comparison block --------------------------------------------
+    # vel_x / cmd / signed error, then the two angle sets, then the two error
+    # norms on the next line so the two tracking errors can be compared directly.
+    if live:
+        out += row(
+            ("vel_x m/s", f"{live['vel_x']:+.3f}"),
+            ("cmd", f"{live['vel_x_cmd']:+.3f}"),
+            ("diff", f"{live['vel_x'] - live['vel_x_cmd']:+.3f}"),
+        )
+        out += row(
+            ("pitch deg", f"{live['pitch_deg']:.2f}"),
+            ("roll deg", f"{live['roll_deg']:.2f}"),
+            ("yaw deg", f"{live['yaw_deg']:.2f}"),
+        )
+    out += row(cell("error_vel_xy", "{:.4f}", 22), cell("error_vel_yaw", "{:.4f}", 22))
+    out += "  (error_vel_* = 2x the true mean error)\n"
 
-    keys: list[str] = []
-    for snap in snapshots[:1]:
-        keys = list(snap)
-    for key in keys:
-        bare = key.rsplit("/", 1)[-1]
-        if bare in hidden:
-            continue
-        value = mean_of(key)
-        if value is None:
-            continue
-        body += line(bare, f"{value:.4f}", pad=26)
+    # ---- termination reasons --------------------------------------------
+    out += row(cell("time_out", "{:.4f}", 20), cell("bad_orientation", "{:.4f}", 22),
+               cell("base_too_low", "{:.4f}", 20))
 
-    print(body, end="", flush=True)
+    # ---- penalties, paired so the two of each kind sit together ----------
+    out += row(cell("action_rate", "{:+.4f}", 22), cell("action_jerk", "{:+.4f}", 22))
+    out += row(cell("joint_torques", "{:+.4f}", 22), cell("joint_acc", "{:+.4f}", 22))
+    out += row(cell("wheel_torques", "{:+.4f}", 22), cell("wheel_spin", "{:+.4f}", 22))
+    out += row(cell("wheel_axle", "{:+.4f}", 22), cell("closure_residual", "{:+.4f}", 22))
+    out += row(cell("roll_rate", "{:+.4f}", 22), cell("lin_vel_z", "{:+.4f}", 22),
+               cell("lin_vel_y", "{:+.4f}", 22))
+
+    # ---- anything the layout above does not know about -------------------
+    for name, value in values.items():
+        out += row((name, f"{value:+.4f}"))
+
+    print(out, end="", flush=True)
 
 
 def _filter_iteration_console(runner, hidden: tuple[str, ...] = HIDDEN_CONSOLE_TERMS) -> None:
@@ -418,8 +510,11 @@ def _filter_iteration_console(runner, hidden: tuple[str, ...] = HIDDEN_CONSOLE_T
         return
     hidden_set = set(hidden)
 
+    env = getattr(runner, "env", None)
+
     def filtered(**kwargs):
         snapshots = [dict(e) for e in getattr(logger, "ep_extras", [])]
+        live = _live_state(env) if env is not None else None
         saved = sys.stdout
         sys.stdout = open(os.devnull, "w")
         try:
@@ -427,7 +522,7 @@ def _filter_iteration_console(runner, hidden: tuple[str, ...] = HIDDEN_CONSOLE_T
         finally:
             sys.stdout.close()
             sys.stdout = saved
-        _print_console_block(logger, kwargs, snapshots, hidden_set)
+        _print_console_block(logger, kwargs, snapshots, hidden_set, live)
 
     logger.log = filtered
     print(f"[INFO] console hides {len(hidden)} reward terms: {', '.join(hidden)}")
@@ -509,6 +604,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "step_trigger": lambda step: step % args_cli.video_interval == 0,
             "video_length": args_cli.video_length,
             "disable_logger": True,
+            # 1 帧 = 1 个控制步 = 20 ms -> 50 fps 才是真实速度。
+            # gymnasium 的 RecordVideo 默认 30 fps，会让回放看起来慢 1.67 倍。
+            "fps": round(1.0 / float(env.unwrapped.step_dt)),
         }
         print("[INFO] Recording videos during training.")
         print_dict(video_kwargs, nesting=4)
