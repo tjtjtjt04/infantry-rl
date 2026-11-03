@@ -2,6 +2,17 @@
 <!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
      Commit Version: 1.6.0-4-g7f85cfe  Build Version: 1.6.7995.38578
      For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<!--
+  Joint <limit> values are referenced to the joint zero (q = 0 = CAD assembly pose, the
+  retracted end of the mechanical stroke).  They are derived from the two stroke-end
+  ABSOLUTE link angles recorded in 底盘数据.txt: for a hip, the travel is the change of the
+  ham angle; for a knee it is the change of the calf angle RELATIVE to the ham
+  (dq = d(calf) - d(ham), ~114.5 deg), because the ham itself rotates too.  The knee values
+  are taken from the closed-loop-consistent pose at the stroke end.  The full mechanical
+  stroke is preserved (leg length 144.8 mm -> 389.7 mm) and q = 0 lies inside every range;
+  read literally as absolute angles, the old values put q = 0 outside six joints and PhysX
+  clamped the mechanism on the first step.
+-->
 <robot
   name="chassis-rl">
   <link
@@ -97,8 +108,8 @@
     <axis
       xyz="0 -1 0" />
     <limit
-      lower="-0.17715"
-      upper="1.3118"
+      lower="-1.488940"
+      upper="0.000100"
       effort="40"
       velocity="16.755" />
   </joint>
@@ -155,8 +166,8 @@
     <axis
       xyz="0 -1 0" />
     <limit
-      lower="1.9989"
-      upper="2.5089"
+      lower="-0.000100"
+      upper="1.999047"
       effort="40"
       velocity="16.755" />
   </joint>
@@ -269,8 +280,8 @@
     <axis
       xyz="0 -1 0" />
     <limit
-      lower="1.8291"
-      upper="3.3187"
+      lower="-0.000100"
+      upper="1.489639"
       effort="40"
       velocity="16.755" />
   </joint>
@@ -327,8 +338,8 @@
     <axis
       xyz="0 -1 0" />
     <limit
-      lower="0.63268"
-      upper="1.1427"
+      lower="-1.999500"
+      upper="0.000100"
       effort="40"
       velocity="16.755" />
   </joint>
@@ -385,8 +396,8 @@
     <axis
       xyz="0 -1 0" />
     <limit
-      lower="-0.17715"
-      upper="1.3118"
+      lower="-1.489639"
+      upper="0.000100"
       effort="40"
       velocity="16.755" />
   </joint>
@@ -443,8 +454,8 @@
     <axis
       xyz="0 -1 0" />
     <limit
-      lower="1.9989"
-      upper="2.5089"
+      lower="-0.000100"
+      upper="1.999500"
       effort="40"
       velocity="16.755" />
   </joint>
@@ -501,8 +512,8 @@
     <axis
       xyz="0 -1 0" />
     <limit
-      lower="1.8291"
-      upper="3.3187"
+      lower="-0.000100"
+      upper="1.488940"
       effort="40"
       velocity="16.755" />
   </joint>
@@ -559,8 +570,8 @@
     <axis
       xyz="0 -1 0" />
     <limit
-      lower="0.63268"
-      upper="1.1427"
+      lower="-1.999047"
+      upper="0.000100"
       effort="40"
       velocity="16.755" />
   </joint>
@@ -620,4 +631,21 @@
       effort="4.92"
       velocity="61.4705" />
   </joint>
+  <!--
+    Closed chain (five-bar wheel-leg): the wheel axle also sits in the back calf's axle hole.
+    Represented with the Isaac Sim <loop_joint> URDF extension (isaacsim.asset.importer.urdf
+    >= 2.1.0), exactly as in assets/infantry-rl/urdf/infantry-rl-sim.urdf.  The importer turns
+    each one into a PhysicsSphericalJoint OUTSIDE the articulation, so PhysX enforces the loop
+    as a real constraint instead of rejecting a closed articulation.  Each link contributes the
+    axle-centre point in its own link frame, computed from this URDF's tree at q = 0 (the CAD
+    assembly pose).  No other physical property of this URDF was modified.
+  -->
+  <loop_joint name="left_calf_axle" type="spherical">
+    <link1 link="left_wheel" rpy="0 0 0" xyz="0.00000000 0.00000000 0.00000000" />
+    <link2 link="left_back_calf" rpy="0 0 0" xyz="0.21773000 0.03494500 -0.15966200" />
+  </loop_joint>
+  <loop_joint name="right_calf_axle" type="spherical">
+    <link1 link="right_wheel" rpy="0 0 0" xyz="0.00000000 0.00000000 0.00000000" />
+    <link2 link="right_back_calf" rpy="0 0 0" xyz="-0.21772998 0.03494390 -0.15966200" />
+  </loop_joint>
 </robot>
