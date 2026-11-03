@@ -15,3 +15,5 @@ v_wheel max: 61.4705
 
 T_wheel max: 4.92
 
+base: 11.339
+
