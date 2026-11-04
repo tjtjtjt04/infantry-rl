@@ -1,6 +1,6 @@
-"""Reward terms for the infantry-rl five-bar balance task.
+"""Reward terms for the chassis-rl squat tasks.
 
-The standard locomotion-style terms delegate to :mod:`isaaclab.envs.mdp` (they are
+The standard terms delegate to :mod:`isaaclab.envs.mdp` (they are
 verified to exist at Isaac Lab 2.3.2, see ``isaac_ws/docs/API_NOTES.md`` section
 6.3); the three task-specific ones -- wheel spin, fall penalty and loop-closure
 error -- are implemented here.
@@ -80,35 +80,8 @@ def wheel_spin_l2(env, action_name: str = "joints") -> torch.Tensor:
     return torch.sum(term._robot.data.joint_vel[:, term.wheel_ids] ** 2, dim=-1)
 
 
-def wheel_torques_excess_l2(
-    env, threshold: float = 1.0, action_name: str = "joints"
-) -> torch.Tensor:
-    """``sum(max(|tau_wheel| - threshold, 0) ** 2)`` over the two wheel joints, ``(N,)``.
-
-    WHY A DEADBAND AND NOT A PLAIN L2
-    ---------------------------------
-    This term exists to stop the policy from using the WHEEL reaction torque as its
-    attitude actuator (Segway-style balancing) instead of the hips.  But the wheels are
-    also the only longitudinal actuator, so a plain ``sum(tau^2)`` charges legitimate
-    driving: holding 2 m/s needs almost no torque, yet accelerating 0 -> 2 m/s at
-    2 m/s^2 needs about 0.9 Nm per wheel, and a command step from +2 to -2 m/s reaches
-    roughly 1.7 Nm.
-
-    The behaviour that must be removed is the *spike*: wheel-torque balancing drives the
-    wheels to 2-3 Nm in fast oscillations.  With ``threshold = 1.0`` Nm the smooth
-    propulsive band is free and only the spikes are charged, so the leg-dominance
-    pressure survives widening the speed range.
-    """
-    term = env.action_manager.get_term(action_name)
-    torque = term._robot.data.applied_torque[:, term.wheel_ids].abs()
-    excess = (torque - threshold).clamp(min=0.0)
-    return torch.sum(excess**2, dim=-1)
 
 
-def wheel_action_l2(env, action_name: str = "joints") -> torch.Tensor:
-    """Small penalty on the commanded wheel velocity targets."""
-    term = env.action_manager.get_term(action_name)
-    return torch.sum(term.processed_actions[:, 4:] ** 2, dim=-1)
 
 
 def leg_axle_skew_abs(env, action_name: str = "joints") -> torch.Tensor:
@@ -261,129 +234,18 @@ def position_xy_alive(
 # ---------------------------------------------------------------------- #
 # velocity-command tracking (locomotion task)
 # ---------------------------------------------------------------------- #
-def track_lin_vel_x_exp(
-    env,
-    command_name: str = "base_velocity",
-    std: float = 0.25,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """``exp(-(vx - vx_cmd)^2 / std^2)``, ``(N,)`` in [0, 1].
-
-    The exponential kernel is the standard Isaac Lab tracking reward: it is bounded,
-    gives a strong gradient near the command and saturates instead of exploding when
-    the robot is far off, which keeps it from dominating the balance terms.
-    """
-    asset: Articulation = env.scene[asset_cfg.name]
-    cmd = env.command_manager.get_command(command_name)[:, 0]
-    err = cmd - asset.data.root_lin_vel_b[:, 0]
-    return torch.exp(-err**2 / std**2)
 
 
-def track_ang_vel_z_exp(
-    env,
-    command_name: str = "base_velocity",
-    std: float = 0.35,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """``exp(-(wz - wz_cmd)^2 / std^2)``, ``(N,)`` in [0, 1].
-
-    ``wz_cmd`` already includes the heading controller, so this single term teaches
-    both "turn at the commanded rate" and "stop turning when the heading is reached".
-    """
-    asset: Articulation = env.scene[asset_cfg.name]
-    cmd = env.command_manager.get_command(command_name)[:, 2]
-    err = cmd - asset.data.root_ang_vel_b[:, 2]
-    return torch.exp(-err**2 / std**2)
 
 
-def track_lin_vel_x_l2(
-    env,
-    command_name: str = "base_velocity",
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """``(vx - vx_cmd)^2``, ``(N,)``.
-
-    WHY THIS IS NEEDED ON TOP OF THE EXP KERNEL
-    -------------------------------------------
-    ``exp(-e^2/std^2)`` has ZERO gradient at ``e = 0`` (the derivative is
-    ``-2 e / std^2 * exp(...)``, which vanishes with e).  That makes the tracking reward
-    flat right at the command, so small deviations -- a few percent of the commanded
-    speed, oscillating at the control rate -- cost almost nothing.  That is exactly the
-    "stop-and-go" ripple that a bounded exp kernel cannot remove: the policy has no
-    restoring force towards a *steady* speed, only towards "roughly the right speed".
-
-    A quadratic term adds the missing local stiffness: its gradient is ``-2 e``, i.e.
-    proportional to the error for ANY error, so it pulls hardest exactly where the exp
-    kernel is blind.  The two together give "get close fast" (exp) and "stay close"
-    (L2).
-    """
-    asset: Articulation = env.scene[asset_cfg.name]
-    err = env.command_manager.get_command(command_name)[:, 0] - asset.data.root_lin_vel_b[:, 0]
-    return err**2
 
 
-def track_ang_vel_z_l2(
-    env,
-    command_name: str = "base_velocity",
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """``(wz - wz_cmd)^2``, ``(N,)``.
-
-    The yaw-rate counterpart of :func:`track_lin_vel_x_l2`, for the same reason: the exp
-    kernel is blind at zero error, so residual yaw oscillation (a two-wheel robot is
-    constantly making small steering corrections) is nearly free.  With a quadratic
-    term any yaw rate that is not the commanded one costs something, which is what
-    removes the visible wobble.
-    """
-    asset: Articulation = env.scene[asset_cfg.name]
-    err = env.command_manager.get_command(command_name)[:, 2] - asset.data.root_ang_vel_b[:, 2]
-    return err**2
 
 
-def track_lin_vel_x_l1(
-    env,
-    command_name: str = "base_velocity",
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """``|vx - vx_cmd|``, ``(N,)``.
-
-    WHY AN L1 TERM ON TOP OF L2 (v1.0.8)
-    ------------------------------------
-    L2's restoring force is ``-2*w*e``: it grows with the error, which is good for large
-    errors but *weak exactly where precision is wanted*.  To hold 2 cm/s the L2 gradient
-    is only ``2*6*0.02 = 0.24`` -- comparable to the noise in the other penalty terms, so
-    it cannot pin the speed down.  L1 has a CONSTANT gradient ``-w`` at every error, so
-    once the policy is within a few cm/s it still feels the same full pull towards the
-    command.  That is what turns "roughly the commanded speed" into "the commanded speed".
-    """
-    asset: Articulation = env.scene[asset_cfg.name]
-    err = env.command_manager.get_command(command_name)[:, 0] - asset.data.root_lin_vel_b[:, 0]
-    return err.abs()
 
 
-def track_ang_vel_z_l1(
-    env,
-    command_name: str = "base_velocity",
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """``|wz - wz_cmd|``, ``(N,)`` -- the yaw-rate counterpart of the term above."""
-    asset: Articulation = env.scene[asset_cfg.name]
-    err = env.command_manager.get_command(command_name)[:, 2] - asset.data.root_ang_vel_b[:, 2]
-    return err.abs()
 
 
-def lin_vel_y_l2(
-    env,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """Squared sideways velocity, ``(N,)``.
-
-    A two-wheel differential drive has no lateral actuator, so sideways motion is
-    always slip/skidding.  Penalising it keeps the robot from dragging itself
-    sideways instead of turning properly.
-    """
-    asset: Articulation = env.scene[asset_cfg.name]
-    return asset.data.root_lin_vel_b[:, 1] ** 2
 
 
 def lin_vel_z_l2(
@@ -429,21 +291,6 @@ def pitch_abs(
     return pitch.abs()
 
 
-def pitch_excess_abs(
-    env,
-    tolerance: float = 0.1,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """``max(|pitch| - tolerance, 0)`` in radians, ``(N,)``.
-
-    A dead-band pitch penalty.  A braking robot legitimately leans a few degrees, so
-    penalising every radian would fight the manoeuvre; the tolerance (default ~5.7 deg)
-    leaves that free.  Beyond it, the L1 excess gives a constant pull back towards
-    level, which is what stops the body from dragging on the ground during a hard stop.
-    It is symmetric, so it also catches an unexpected nose-down dive.
-    """
-    _, pitch, _ = _euler(env, asset_cfg)
-    return (pitch.abs() - tolerance).clamp(min=0.0)
 
 
 def ang_vel_y_l2(
@@ -459,25 +306,6 @@ def ang_vel_y_l2(
     return asset.data.root_ang_vel_b[:, 1] ** 2
 
 
-def hip_deviation_abs(
-    env,
-    action_name: str = "joints",
-    tolerance: float = 0.1,
-) -> torch.Tensor:
-    """``mean(max(|hip - nominal_hip| - tolerance, 0))`` over the four hips, ``(N,)``.
-
-    WHY THIS EXISTS (braking)
-    -------------------------
-    The hips are the only way to shift the body's centre of gravity fore/aft, so a
-    braking policy legitimately uses them.  In practice it used almost the whole
-    ``hip_range`` (mean 18 deg, max 25 deg against a 25.8 deg range) and lifted a
-    wheel/leg off the ground, which is what produced the nose-up fall.  A dead band
-    keeps normal attitude work free while charging only the excessive, saturating
-    poses; it does not forbid hip use.
-    """
-    term = env.action_manager.get_term(action_name)
-    deviation = (term._robot.data.joint_pos[:, term.hip_ids] - term.nominal_hips).abs()
-    return (deviation - tolerance).clamp(min=0.0).mean(dim=-1)
 
 
 def hip_lock_deviation_abs(
@@ -498,68 +326,10 @@ def hip_lock_deviation_abs(
     return (deviation - tolerance).clamp(min=0.0).mean(dim=-1)
 
 
-def hip_deviation_stance_abs(
-    env,
-    action_name: str = "joints",
-    tolerance: float = 0.10,
-) -> torch.Tensor:
-    """Like :func:`hip_deviation_abs`, but measured against the intended stance.
-
-    The scripted stance bias (A + RB leg extension) moves the hips by
-    ``[+d, -d, +d, -d]``.  Charging that deviation as "excessive hip use" would
-    fight the extension, so subtract the intended offsets first.  The term still
-    charges asymmetric bracing and policy actions beyond the dead band, which is
-    what it was introduced for in the braking task.
-    """
-    term = env.action_manager.get_term(action_name)
-    measured = term._robot.data.joint_pos[:, term.hip_ids] - term.nominal_hips
-    deviation = (measured - term.intended_hip_offsets).abs()
-    return (deviation - tolerance).clamp(min=0.0).mean(dim=-1)
 
 
-def stance_hold_abs(
-    env,
-    action_name: str = "joints",
-    tolerance: float = 0.10,
-    min_stance: float = 0.05,
-) -> torch.Tensor:
-    """Dead-band penalty on the policy cancelling the scripted stance.
-
-    Active only while the stance bias is non-trivial.  The inherited
-    ``hip_deviation`` dead band is wide (0.22 rad in the teleop checkpoint), so
-    without this term the policy could quietly undo most of a +0.30 extension by
-    pushing the hips the other way.  The dead band leaves normal balance work and
-    small asymmetric corrections free.
-    """
-    term = env.action_manager.get_term(action_name)
-    measured = term._robot.data.joint_pos[:, term.hip_ids] - term.nominal_hips
-    err = (measured - term.stance_offsets).abs()
-    active = term.stance.abs() > float(min_stance)
-    return active.float() * (err - float(tolerance)).clamp(min=0.0).mean(dim=-1)
 
 
-def base_height_stance_abs(
-    env,
-    target_height: float,
-    stance_gain: float = 0.195,
-    stance_gain2: float = 0.0,
-    action_name: str = "joints",
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """``|root_z - (target_height + stance_gain * d + stance_gain2 * d^2)|``, ``(N,)``.
-
-    The measured leg kinematics are curved at deep crouch (the five-bar folds):
-    ``base_z ≈ 0.1888 + 0.1901 d + 0.0173 d^2`` fits the full [-0.6, +0.45]
-    range to ~3 mm.  A pure linear gain overestimates the drop at d=-0.55/-0.6
-    by ~8-11 mm, which would pull the height reward below the teleop fall
-    threshold.  The quadratic term (default 0) keeps every other task unchanged.
-    """
-    asset: Articulation = env.scene[asset_cfg.name]
-    height = asset.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]
-    term = env.action_manager.get_term(action_name)
-    d = term.stance
-    target = float(target_height) + float(stance_gain) * d + float(stance_gain2) * d * d
-    return (height - target).abs()
 
 
 def roll_abs(
@@ -583,30 +353,6 @@ def roll_abs(
     return roll.abs()
 
 
-def roll_when_straight_abs(
-    env,
-    command_name: str = "base_velocity",
-    wz_scale: float = 2.5,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """``|roll|`` scaled DOWN as the commanded yaw rate grows, ``(N,)``.
-
-    This term encodes "walk upright, but you may bank while cornering".  Its value is
-    multiplied by ``1 - min(|wz_cmd| / wz_scale, 1)``:
-
-    * driving straight (``wz_cmd = 0``)   -> full penalty, the base must be level;
-    * turning at the maximum trained rate  -> zero penalty, roll is free to bank;
-    * rotating in place (``wz_cmd`` large, ``vx = 0``) -> also free, and no bank is
-      needed anyway because there is no centripetal acceleration when ``v = 0``.
-
-    Gating on the *commanded* yaw rate rather than on the measured one is deliberate:
-    gating on the measurement would let the robot escape the penalty by leaning, which
-    is exactly the behaviour being removed.
-    """
-    roll, _, _ = _euler(env, asset_cfg)
-    term = env.command_manager.get_term(command_name)
-    turn = (term.command[:, 2].abs() / max(wz_scale, 1e-6)).clamp(0.0, 1.0)
-    return roll.abs() * (1.0 - turn)
 
 
 def ang_vel_x_l2(
@@ -622,67 +368,10 @@ def ang_vel_x_l2(
     return asset.data.root_ang_vel_b[:, 0] ** 2
 
 
-def base_height_abs(
-    env,
-    target_height: float,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """``|root_z - target_height|`` in metres, ``(N,)``.
-
-    L1 again, for the same reason as :func:`pitch_abs`: measured behaviour with the
-    squared version (weight -10) was a robot that walked fine but **crouched about
-    5 cm too low**, because at that offset the squared penalty contributes ~80x less
-    per step than the velocity-tracking reward and never wins the trade.
-    """
-    asset: Articulation = env.scene[asset_cfg.name]
-    height = asset.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]
-    return (height - target_height).abs()
 
 
-def heading_error_l2(
-    env,
-    command_name: str = "base_velocity",
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """Squared heading error relative to the *command manager's* heading target.
-
-    This is the inner-loop error of the cascaded controller: ``wz_cmd`` is derived
-    from it, so penalising it as well tells the policy "do not merely match the yaw
-    rate, actually arrive at the target heading".
-    """
-    term = env.command_manager.get_term(command_name)
-    if not getattr(term.cfg, "heading_command", False):
-        return torch.zeros(env.num_envs, device=env.device)
-    asset: Articulation = env.scene[asset_cfg.name]
-    err = math_utils.wrap_to_pi(term.heading_target - asset.data.heading_w)
-    return err**2
 
 
-def heading_error_l1(
-    env,
-    command_name: str = "base_velocity",
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """``|heading error|`` relative to the command manager's heading target, ``(N,)`` rad.
-
-    WHY AN L1 TERM ON TOP OF ``heading_error_l2``
-    ---------------------------------------------
-    ``heading_error_l2`` is squared, so its gradient ``2 * e`` vanishes exactly where
-    the requirement is strict: a 2 deg (0.035 rad) yaw error with weight -0.6 has a
-    penalty of 7e-4 -- far below the noise of the velocity terms.  The policy is
-    therefore free to cruise with a few degrees of yaw offset, which at 3 m/s means
-    sideways travel of ~0.15 m/s.  ``|e|`` has a constant gradient, so it keeps
-    pulling until the heading error is actually small, from any distance.
-
-    Only active in the heading-command task; zero otherwise (same guard as
-    :func:`heading_error_l2`).
-    """
-    term = env.command_manager.get_term(command_name)
-    if not getattr(term.cfg, "heading_command", False):
-        return torch.zeros(env.num_envs, device=env.device)
-    asset: Articulation = env.scene[asset_cfg.name]
-    err = math_utils.wrap_to_pi(term.heading_target - asset.data.heading_w)
-    return err.abs()
 
 
 def heading_alive(
@@ -702,324 +391,66 @@ def heading_alive(
     return (err.abs() < tolerance).float()
 
 
-def base_height_below(env, minimum_height: float, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
-    """Penalty (as a reward term) for being below a minimum root height."""
-    asset: Articulation = env.scene[asset_cfg.name]
-    height = asset.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]
-    return (height < minimum_height).float()
 
 
 # ---------------------------------------------------------------------- #
 # fall recovery
 # ---------------------------------------------------------------------- #
-def uprightness(
-    env,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """``(1 - projected_gravity_z) / 2``: 1 upright, 0 upside down, 0.5 at 90 deg.
-
-    Unlike :func:`flat_orientation_l2`, this distinguishes upright from upside down:
-    the projected gravity z is -1 upright and +1 on the back, while its x/y
-    components are zero in both cases.  It is the main recovery reward.
-    """
-    asset: Articulation = env.scene[asset_cfg.name]
-    return (1.0 - asset.data.projected_gravity_b[:, 2]) * 0.5
 
 
-def upright_still(
-    env,
-    lin_threshold: float = 0.2,
-    ang_threshold: float = 0.5,
-    min_upright: float = 0.9,
-    min_height: float = 0.0,
-    hold_time: float = 0.5,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """1.0 while upright, tall enough and nearly still, else 0, ``(N,)``.
-
-    The upright reward alone pays for passing through the upright pose; this bonus
-    pays for STAYING there.  ``min_height`` is essential: without it the policy can
-    count a deep squat (upright orientation, root z~0.10 m, hips still tucked) as
-    success and never execute the final leg extension.  It also maintains the hold
-    counter / per-episode success flag used by the logging and one-shot bonus.
-    Recovery does NOT terminate early on success.
-    """
-    asset: Articulation = env.scene[asset_cfg.name]
-    upright = uprightness(env, asset_cfg) > min_upright
-    if min_height > 0.0:
-        upright = upright & (_root_height(env, asset_cfg) > min_height)
-    lin_speed = torch.norm(asset.data.root_lin_vel_b, dim=-1)
-    ang_speed = torch.norm(asset.data.root_ang_vel_b, dim=-1)
-    ok = upright & (lin_speed < lin_threshold) & (ang_speed < ang_threshold)
-
-    counter = getattr(env, "recovery_upright_steps", None)
-    if counter is not None:
-        env.recovery_upright_steps = torch.where(ok, counter + 1, torch.zeros_like(counter))
-        hold_steps = max(1, int(round(hold_time / float(env.step_dt))))
-        success = getattr(env, "recovery_success", None)
-        if success is not None:
-            success |= env.recovery_upright_steps >= hold_steps
-    return ok.float()
 
 
-def uprightness_power(
-    env,
-    power: float = 3.0,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """``uprightness ** power``: a much sharper pull towards fully upright.
-
-    The linear uprightness is already 0.85 at 46 deg, so a policy can sit at a
-    comfortable lean and collect most of the reward without ever standing up.  The
-    cubic (or higher) version makes the last 20-30 deg worth substantially more.
-    """
-    return uprightness(env, asset_cfg) ** float(power)
 
 
-def _root_height(env, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    asset: Articulation = env.scene[asset_cfg.name]
-    return asset.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]
 
 
-def upright_zone(
-    env,
-    min_upright: float = 0.97,
-    min_height: float = 0.0,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """1.0 when clearly upright (and tall enough), else 0, ``(N,)``.
-
-    A bounded near-upright bonus that does not require standing still; the stillness
-    requirement is handled by :func:`upright_still`.  ``min_height`` prevents the
-    deep-squat false positive (upright orientation but still tucked at z~0.10 m).
-    """
-    ok = uprightness(env, asset_cfg) > min_upright
-    if min_height > 0.0:
-        ok = ok & (_root_height(env, asset_cfg) > min_height)
-    return ok.float()
 
 
-def leg_extension_abs(
-    env,
-    action_name: str = "joints",
-    upright_min: float = 0.90,
-    max_height: float = 0.16,
-) -> torch.Tensor:
-    """Mean ``|hip - nominal|`` while upright but still too low, ``(N,)``.
-
-    This is the dense gradient for the last phase of the user's strategy: after the
-    robot has tuck-rolled itself upright it often stops in a deep squat (root z~0.10)
-    because the success/height rewards only pay at the very end.  While the base is
-    upright but below ``max_height``, this term pulls all four hips from the tuck
-    (-0.45/+0.45) back to the nominal stance.  It is gated off once the robot is tall
-    enough, so it does not fight the initial tuck.
-    """
-    term = env.action_manager.get_term(action_name)
-    hip = (term._robot.data.joint_pos[:, term.hip_ids] - term.nominal_hips).abs().mean(dim=-1)
-    upright = uprightness(env) > upright_min
-    low = _root_height(env, SceneEntityCfg("robot")) < max_height
-    return (upright & low).float() * hip
 
 
-def recovered_bonus(
-    env,
-    hold_time: float = 0.5,
-) -> torch.Tensor:
-    """One-step +1 when the recovery hold counter FIRST reaches the success length.
-
-    The per-step upright/still rewards alone create a strong local optimum at
-    ``uprightness ~= 0.90``: the robot can lean there, collect most of the upright
-    reward and never cross the success threshold.  This one-shot bonus (weight 50)
-    makes actually finishing the stand-up much more valuable than hovering near it.
-    The counter is updated by :func:`mdp.terminations.upright_and_still`; the reward
-    manager runs after the termination manager, so the value is visible here.
-    """
-    counter = getattr(env, "recovery_upright_steps", None)
-    if counter is None:
-        return torch.zeros(env.num_envs, device=env.device)
-    hold_steps = max(1, int(round(hold_time / float(env.step_dt))))
-    return (counter == hold_steps).float()
 
 
-def roll_fail_penalty(
-    env,
-    limit_angle: float = 1.05,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """One-step penalty on episodes that END by exceeding the roll limit.
-
-    Without it, a side-roll termination and a timeout are nearly equivalent (both
-    lose the remaining upright reward), so PPO has little reason to avoid rolling.
-    """
-    terminated = getattr(env, "reset_terminated", None)
-    if terminated is None:
-        return torch.zeros(env.num_envs, device=env.device)
-    asset: Articulation = env.scene[asset_cfg.name]
-    roll, _, _ = math_utils.euler_xyz_from_quat(asset.data.root_quat_w)
-    return (terminated & (roll.abs() > limit_angle)).float()
 
 
-def tuck_match(
-    env,
-    action_name: str = "joints",
-    front_tuck: float = -0.45,
-    back_tuck: float = 0.45,
-    upright_max: float = 0.90,
-    sigma: float = 0.15,
-) -> torch.Tensor:
-    """Bounded reward for the deepest symmetric squat while still fallen.
-
-    The measured five-bar pose with hip offsets ``front=-0.45, back=+0.45`` has
-    ``L0 = 0.165 m`` (nominal 0.250 m) and the wheel axle directly under the hip
-    midpoint.  This is the "tuck the legs, drive the wheels, then extend" recovery
-    strategy the user asked for.  The gate switches the term off once the robot is
-    close to upright, so it cannot become a reward for simply staying squatting.
-    """
-    term = env.action_manager.get_term(action_name)
-    hip_offset = term._robot.data.joint_pos[:, term.hip_ids] - term.nominal_hips
-    target = hip_offset.new_tensor([front_tuck, back_tuck, front_tuck, back_tuck])
-    err = ((hip_offset - target) ** 2).mean(dim=-1)
-    upright = (1.0 - term._robot.data.projected_gravity_b[:, 2]) * 0.5
-    gate = (upright < upright_max).float()
-    return gate * torch.exp(-err / max(sigma * sigma, 1e-9))
 
 
 # ---------------------------------------------------------------------- #
 # braking task
 # ---------------------------------------------------------------------- #
-def _brake_term(env, command_name: str):
-    """The :class:`~mdp.commands.BrakingVelocityCommand` term that owns the schedule."""
-    return env.command_manager.get_term(command_name)
 
 
-def brake_distance(env, command_name: str = "base_velocity") -> torch.Tensor:
-    """Planar distance travelled since the brake command started, ``(N,)`` in metres.
-
-    Zero before the brake.  This is the quantity the user cares about ("how far does
-    it slide before it stops"), and it deliberately does NOT distinguish rolling from
-    sliding: a short skid is allowed if it stops the robot sooner.
-    """
-    term = _brake_term(env, command_name)
-    asset: Articulation = env.scene[term.cfg.asset_name]
-    delta = asset.data.root_pos_w[:, :2] - term.brake_position
-    distance = torch.norm(delta, dim=-1)
-    return torch.where(term.brake_started, distance, torch.zeros_like(distance))
 
 
-def brake_distance_exp(
-    env, command_name: str = "base_velocity", scale: float = 0.5
-) -> torch.Tensor:
-    """``exp(-distance / scale)`` after the brake, ``(N,)`` in [0, 1]; 0 before it.
-
-    A bounded "shorter is better" signal.  With ``scale=0.5`` a 0.5 m stop scores
-    e^-1 = 0.37 and a 1.0 m stop scores 0.14, while a 0.2 m stop scores 0.67.
-    """
-    d = brake_distance(env, command_name)
-    term = _brake_term(env, command_name)
-    return torch.where(term.brake_started, torch.exp(-d / max(scale, 1e-6)), torch.zeros_like(d))
 
 
-def brake_distance_l1(env, command_name: str = "base_velocity") -> torch.Tensor:
-    """``distance`` after the brake, ``(N,)`` in metres; 0 before it.
-
-    The exp kernel is flat near zero error; this L1 term keeps a constant pull towards
-    a shorter stop at every distance.
-    """
-    return brake_distance(env, command_name)
 
 
-def brake_overshoot(
-    env, command_name: str = "base_velocity", tolerance: float = 1.0
-) -> torch.Tensor:
-    """``max(distance - tolerance, 0)`` in metres, ``(N,)``.
-
-    Encodes "a small slide is allowed": up to ``tolerance`` metres is free, and only
-    the excess is charged.  With the measured 3.69 Nm / 12.8 kg drivetrain the
-    physical minimum from 3 m/s is about 0.53 m, so a tolerance around 1.0 m is a
-    realistic "short stop with some skid" target.
-    """
-    d = brake_distance(env, command_name)
-    term = _brake_term(env, command_name)
-    excess = (d - tolerance).clamp(min=0.0)
-    return torch.where(term.brake_started, excess, torch.zeros_like(excess))
 
 
-def brake_standstill(
-    env,
-    command_name: str = "base_velocity",
-    speed_threshold: float = 0.1,
-    yaw_threshold: float = 0.3,
-) -> torch.Tensor:
-    """1.0 once the robot is stopped after braking, ``(N,)``.
-
-    Requires the brake phase to have started, a small body forward speed and a small
-    yaw rate.  This gives an explicit "stay balanced at zero" bonus instead of relying
-    only on the vanishing velocity-tracking error.
-    """
-    term = _brake_term(env, command_name)
-    asset: Articulation = env.scene[term.cfg.asset_name]
-    speed = asset.data.root_lin_vel_b[:, 0].abs()
-    yaw_rate = asset.data.root_ang_vel_b[:, 2].abs()
-    stopped = (
-        term.brake_started
-        & (speed < speed_threshold)
-        & (yaw_rate < yaw_threshold)
-    )
-    return stopped.float()
 
 
 __all__ = [
     "action_jerk_l2",
     "action_rate_l2",
     "ang_vel_x_l2",
-    "base_height_abs",
-    "base_height_below",
+    "ang_vel_y_l2",
     "base_height_l2",
-    "base_height_stance_abs",
-    "brake_distance",
-    "brake_distance_exp",
-    "brake_distance_l1",
-    "brake_overshoot",
-    "brake_standstill",
     "closure_residual_l2",
     "fall_penalty",
     "flat_orientation_l2",
     "heading_alive",
-    "heading_error_l1",
-    "heading_error_l2",
     "heading_l2",
+    "hip_lock_deviation_abs",
     "joint_acc_l2",
     "joint_torques_l2",
     "joint_vel_l2",
     "leg_axle_skew_abs",
     "lin_vel_xy_l2",
-    "lin_vel_y_l2",
     "lin_vel_z_l2",
-    "ang_vel_y_l2",
-    "hip_deviation_abs",
-    "hip_deviation_stance_abs",
-    "hip_lock_deviation_abs",
-    "stance_hold_abs",
     "pitch_abs",
-    "pitch_excess_abs",
     "position_xy_alive",
     "position_xy_l2",
     "roll_abs",
-    "roll_when_straight_abs",
-    "track_ang_vel_z_exp",
-    "track_ang_vel_z_l2",
-    "track_lin_vel_x_exp",
-    "track_lin_vel_x_l2",
-    "tuck_match",
-    "leg_extension_abs",
-    "upright_still",
-    "upright_zone",
-    "uprightness",
-    "uprightness_power",
-    "recovered_bonus",
-    "roll_fail_penalty",
-    "wheel_action_l2",
-    "wheel_torques_excess_l2",
     "wheel_spin_l2",
     "yaw_rate_l2",
 ]

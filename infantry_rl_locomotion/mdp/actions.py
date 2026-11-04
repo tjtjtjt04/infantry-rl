@@ -1,4 +1,4 @@
-"""Action terms for the infantry-rl five-bar balance task.
+"""Action terms for the chassis-rl five-bar balance tasks.
 
 PhysX does **not** enforce the closed chain of this robot (the articulation has 10
 joints; ``loop_joints/*_calf_axle`` are not DOFs), so the two knees of each leg are
@@ -29,12 +29,19 @@ from robot_model import (
 
 
 class FiveBarJointAction(ActionTerm):
-    """Hip position offsets + wheel velocity targets, with loop-closing knees.
+    """Hip/wheel commands with loop-closing knees.
 
-    Action vector (6 dims)::
+    Two action semantics are supported:
 
-        [0:4] hip position offset from the nominal stance, in :data:`HIP_ORDER`
+    * position/velocity (``torque_control=False``, ``squat``)::
+
+        [0:4] hip position offset from the nominal stance (rad), in :data:`HIP_ORDER`
         [4:6] wheel velocity target (rad/s), in :data:`WHEEL_ORDER`
+
+    * pure torque (``torque_control=True``, ``squat_torque``)::
+
+        [0:4] hip torque (Nm), in :data:`HIP_ORDER`
+        [4:6] wheel torque (Nm), in :data:`WHEEL_ORDER`
 
     The four knees are *not* part of the action: they are solved from the measured
     hip angles at every control step (see :meth:`update_knee_targets`).
@@ -64,7 +71,14 @@ class FiveBarJointAction(ActionTerm):
         #: the hips at ``nominal + hip_bias``.  The squat-balance task uses it to train
         #: a two-wheel policy on a mechanically fixed, deepest-possible stance.
         self._lock_hips = bool(cfg.lock_hips)
-        self._num_hip_actions = 0 if self._lock_hips else self._num_hips
+        self._torque_control = bool(cfg.torque_control)
+        if self._torque_control and not self._lock_hips:
+            raise ValueError("torque_control=True requires lock_hips=True (the knee loop needs the locked reference pose)")
+        # lock_hips + position control: wheels only.  torque control: 4 hip torques
+        # + 2 wheel torques, even though the hips keep the locked reference pose.
+        self._num_hip_actions = (
+            self._num_hips if self._torque_control else (0 if self._lock_hips else self._num_hips)
+        )
         self._action_dim = self._num_hip_actions + self._num_wheels
 
         self._raw_actions = torch.zeros(self.num_envs, self._action_dim, device=self.device)
@@ -74,13 +88,33 @@ class FiveBarJointAction(ActionTerm):
         #: wheel velocity targets actually written to PhysX in the last step, after the
         #: optional heading-loop override.  Used by the env's wheel-speed diagnostics.
         self.applied_wheel_targets = self._wheel_targets.clone()
+        #: pure-torque commands (Nm), written to PhysX every control step
+        self._hip_torques = torch.zeros(self.num_envs, self._num_hips, device=self.device)
+        self._wheel_torques = torch.zeros(self.num_envs, self._num_wheels, device=self.device)
+        #: policy + training assist (the value actually written to PhysX)
+        self._hip_torques_applied = self._hip_torques.clone()
+        self._wheel_torques_applied = self._wheel_torques.clone()
+        #: training-only PD/damping assists, decayed to zero; zero in play
+        self._hip_assist = torch.zeros_like(self._hip_torques)
+        self._wheel_assist = torch.zeros_like(self._wheel_torques)
+        self._wheel_pitch_assist = torch.zeros(self.num_envs, 1, device=self.device)
+        self._wheel_teacher_assist = torch.zeros_like(self._wheel_torques)
+        self._hip_torques_prev = self._hip_torques.clone()
+        self._wheel_torques_prev = self._wheel_torques.clone()
+        #: training-only wheel-velocity teacher (loaded lazily; None at play)
+        self._teacher = None
+        if self._torque_control and cfg.teacher_checkpoint:
+            from .teacher import SquatTeacherPolicy  # noqa: PLC0415
+
+            self._teacher = SquatTeacherPolicy(
+                cfg.teacher_checkpoint, self.num_envs, self.device
+            )
+            print(f"[cfg] squat_torque teacher: {cfg.teacher_checkpoint} (wheel velocity -> torque)")
 
         # nominal stance (broadcast over environments)
         self._nominal_hips = self.model.nominal_hips.unsqueeze(0).repeat(self.num_envs, 1)
         self._nominal_knees = self.model.nominal_knees.unsqueeze(0).repeat(self.num_envs, 1)
-        #: constant hip offset applied on top of the nominal stance.  Recovery uses
-        #: it to make ZERO action the deepest squat, so the policy starts from the
-        #: tuck pose and learns to extend from there.  Zero for every other task.
+        #: constant hip offset applied on top of the nominal stance: the squat pose.
         self._hip_bias = torch.tensor(
             cfg.hip_bias, device=self.device, dtype=torch.float32
         ).view(1, -1)
@@ -93,11 +127,10 @@ class FiveBarJointAction(ActionTerm):
                 f"hip_symmetry must be 'off' or 'master_rf', got {cfg.hip_symmetry!r}"
             )
 
-        # --- scripted symmetric stance bias (leg extension / retraction) -------
-        # Kept separate from `_hip_bias` on purpose: HandoffController rewrites
-        # `_hip_bias` (1,4) on every phase change for the recovery tuck, while the
-        # stance is a per-env (N,) scalar driven by training randomization or the
-        # gamepad.  Both are added to the hip targets; neither clobbers the other.
+        # --- optional scripted symmetric stance bias (leg extension/retraction) ---
+        # Kept separate from `_hip_bias`: it is a per-env (N,) scalar, while the
+        # locked squat is a constant (1,4) offset.  Both are added to the hip
+        # targets when position control is active; neither clobbers the other.
         self._stance = torch.zeros(self.num_envs, device=self.device)
         self._stance_target = torch.zeros_like(self._stance)
         self._stance_sample = torch.zeros_like(self._stance)
@@ -112,11 +145,19 @@ class FiveBarJointAction(ActionTerm):
         self._sym_blend = torch.zeros(self.num_envs, device=self.device)
         self._reset_stance_timer(slice(None))
 
-        self._scale = torch.tensor(
-            [cfg.hip_scale] * self._num_hip_actions + [cfg.wheel_scale] * self._num_wheels,
-            device=self.device,
-            dtype=torch.float32,
-        )
+        if self._torque_control:
+            self._scale = torch.tensor(
+                [cfg.hip_torque_scale] * self._num_hip_actions
+                + [cfg.wheel_torque_scale] * self._num_wheels,
+                device=self.device,
+                dtype=torch.float32,
+            )
+        else:
+            self._scale = torch.tensor(
+                [cfg.hip_scale] * self._num_hip_actions + [cfg.wheel_scale] * self._num_wheels,
+                device=self.device,
+                dtype=torch.float32,
+            )
 
         # joint safety envelope: keep every command inside the measured feasible set
         limits = joint_limits()
@@ -135,6 +176,13 @@ class FiveBarJointAction(ActionTerm):
         )
         self._knee_lower = torch.tensor([limits[n][0] + cfg.limit_margin for n in KNEE_ORDER], device=self.device)
         self._knee_upper = torch.tensor([limits[n][1] - cfg.limit_margin for n in KNEE_ORDER], device=self.device)
+        if self._torque_control:
+            # The hips are torque-driven, so this is a REFERENCE pose only: it feeds
+            # ``locked_hips`` (hip-lock reward / reset / observations) and is never
+            # written as a position target.
+            self._hip_targets = torch.clamp(
+                self._nominal_hips + self._hip_bias, self._hip_lower, self._hip_upper
+            )
 
         # --- optional fixed-hip (squat) pose -------------------------------
         # With ``lock_hips`` the four hip targets are ``nominal + hip_bias`` and the
@@ -224,8 +272,47 @@ class FiveBarJointAction(ActionTerm):
 
     @property
     def processed_actions(self) -> torch.Tensor:
-        """Scaled action: hip offsets (rad) followed by wheel velocity targets (rad/s)."""
+        """Scaled action in :data:`HIP_ORDER` then :data:`WHEEL_ORDER`.
+
+        Position mode: hip offsets (rad) followed by wheel velocity targets (rad/s).
+        Torque mode: hip torques (Nm) followed by wheel torques (Nm).
+        """
         return self._processed_actions
+
+    @property
+    def torque_control(self) -> bool:
+        """True when the action is a 6-D hip/wheel torque vector."""
+        return self._torque_control
+
+    @property
+    def hip_torques(self) -> torch.Tensor:
+        """Clamped *policy* hip torque, ``(N, 4)`` in :data:`HIP_ORDER` (Nm)."""
+        return self._hip_torques
+
+    @property
+    def hip_torques_applied(self) -> torch.Tensor:
+        """Policy + training assist, i.e. the hip torque written to PhysX (Nm)."""
+        return self._hip_torques_applied
+
+    @property
+    def hip_assist_torques(self) -> torch.Tensor:
+        """Training-only PD assist torque, ``(N, 4)`` (Nm); zero during play."""
+        return self._hip_assist
+
+    @property
+    def wheel_torques(self) -> torch.Tensor:
+        """Clamped *policy* wheel torque, ``(N, 2)`` in :data:`WHEEL_ORDER` (Nm)."""
+        return self._wheel_torques
+
+    @property
+    def wheel_torques_applied(self) -> torch.Tensor:
+        """Policy + training damping, i.e. the wheel torque written to PhysX (Nm)."""
+        return self._wheel_torques_applied
+
+    @property
+    def wheel_assist_torques(self) -> torch.Tensor:
+        """Training-only wheel damping torque, ``(N, 2)`` (Nm); zero during play."""
+        return self._wheel_assist
 
     @property
     def hip_ids(self) -> list[int]:
@@ -246,7 +333,11 @@ class FiveBarJointAction(ActionTerm):
 
     @property
     def hip_targets(self) -> torch.Tensor:
-        """Current (clamped) hip position targets, ``(N, 4)`` in :data:`HIP_ORDER`."""
+        """Current (clamped) hip position targets, ``(N, 4)`` in :data:`HIP_ORDER`.
+
+        In torque mode these are the fixed ``nominal + hip_bias`` reference pose,
+        not a command written to PhysX.
+        """
         return self._hip_targets
 
     @property
@@ -451,6 +542,139 @@ class FiveBarJointAction(ActionTerm):
         self._action_prev1 = self._raw_actions.clone()
         self._raw_actions[:] = actions
         self._processed_actions = self._raw_actions * self._scale
+
+        if self._torque_control:
+            # Pure torque: channels [0:4] are hip torques, [4:6] wheel torques.
+            # No position/velocity targets and none of the stance/outer-loop logic
+            # (they all act on hip position or wheel velocity).
+            tau = self._processed_actions
+            hip_tau = torch.clamp(
+                tau[:, : self._num_hip_actions],
+                -float(self.cfg.hip_effort_limit),
+                float(self.cfg.hip_effort_limit),
+            )
+            wheel_tau = torch.clamp(
+                tau[:, self._num_hip_actions :],
+                -float(self.cfg.wheel_effort_limit),
+                float(self.cfg.wheel_effort_limit),
+            )
+            if float(self.cfg.max_hip_torque_delta) > 0.0:
+                d = float(self.cfg.max_hip_torque_delta)
+                hip_tau = self._hip_torques_prev + torch.clamp(
+                    hip_tau - self._hip_torques_prev, -d, d
+                )
+                hip_tau = torch.clamp(
+                    hip_tau, -float(self.cfg.hip_effort_limit), float(self.cfg.hip_effort_limit)
+                )
+            if float(self.cfg.max_wheel_torque_delta) > 0.0:
+                d = float(self.cfg.max_wheel_torque_delta)
+                wheel_tau = self._wheel_torques_prev + torch.clamp(
+                    wheel_tau - self._wheel_torques_prev, -d, d
+                )
+                wheel_tau = torch.clamp(
+                    wheel_tau,
+                    -float(self.cfg.wheel_effort_limit),
+                    float(self.cfg.wheel_effort_limit),
+                )
+            # Reference pose only (reset knee pair, hip-lock reward, observations).
+            self._hip_targets = torch.clamp(
+                self._nominal_hips + self._hip_bias, self._hip_lower, self._hip_upper
+            )
+            # Training-only assists: start from a held squat (hip PD) and a braked
+            # wheel (damping), then decay both to zero so the final policy is pure
+            # torque.  The decay uses the global control-step counter.
+            hip_assist_on = (
+                float(self.cfg.hip_assist_kp) > 0.0 or float(self.cfg.hip_assist_kd) > 0.0
+            )
+            wheel_assist_on = float(self.cfg.wheel_assist_kd) > 0.0
+            pitch_assist_on = (
+                float(self.cfg.wheel_pitch_assist_kp) > 0.0
+                or float(self.cfg.wheel_pitch_assist_kd) > 0.0
+            )
+            if hip_assist_on or wheel_assist_on or pitch_assist_on:
+                decay_steps = int(self.cfg.hip_assist_decay_steps)
+                if decay_steps > 0:
+                    t = float(getattr(self._env, "common_step_counter", 0))
+                    assist_scale = max(0.0, 1.0 - t / float(decay_steps))
+                else:
+                    assist_scale = 1.0
+            else:
+                assist_scale = 0.0
+
+            if hip_assist_on:
+                q = self._robot.data.joint_pos[:, self._hip_ids]
+                qd = self._robot.data.joint_vel[:, self._hip_ids]
+                self._hip_assist = assist_scale * (
+                    float(self.cfg.hip_assist_kp) * (self._hip_targets - q)
+                    - float(self.cfg.hip_assist_kd) * qd
+                )
+            else:
+                self._hip_assist.zero_()
+            if wheel_assist_on:
+                # Same damping law as the original velocity servo at target 0:
+                # tau = -kd * wheel_vel.
+                wheel_vel = self._robot.data.joint_vel[:, self._wheel_ids]
+                self._wheel_assist = assist_scale * (
+                    -float(self.cfg.wheel_assist_kd) * wheel_vel
+                )
+            else:
+                self._wheel_assist.zero_()
+            if pitch_assist_on:
+                # Inverted-pendulum common torque.  The sign chain is the same as
+                # ``_pitch_speed_correction``: positive pitch -> drive the wheels
+                # forward, i.e. a negative common wheel torque here.
+                quat = self._robot.data.root_quat_w
+                qw, qx, qy, qz = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+                pitch = torch.asin(torch.clamp(2.0 * (qw * qy - qz * qx), -1.0, 1.0))
+                pitch_rate = self._robot.data.root_ang_vel_b[:, 1]
+                tau_pitch = -(
+                    float(self.cfg.wheel_pitch_assist_kp) * pitch
+                    + float(self.cfg.wheel_pitch_assist_kd) * pitch_rate
+                )
+                self._wheel_pitch_assist = assist_scale * tau_pitch.unsqueeze(-1)
+            else:
+                self._wheel_pitch_assist.zero_()
+            if self._teacher is not None and assist_scale > 0.0:
+                from .teacher import build_squat_teacher_obs  # noqa: PLC0415
+
+                teacher_obs = build_squat_teacher_obs(
+                    self._env, self, float(self.cfg.teacher_base_height)
+                )
+                teacher_action = self._teacher.act(teacher_obs)
+                v_target = float(self.cfg.teacher_wheel_scale) * torch.clamp(
+                    teacher_action,
+                    -float(self.cfg.teacher_clip_actions),
+                    float(self.cfg.teacher_clip_actions),
+                )
+                wheel_vel = self._robot.data.joint_vel[:, self._wheel_ids]
+                self._wheel_teacher_assist = assist_scale * float(
+                    self.cfg.teacher_servo_kd
+                ) * (v_target - wheel_vel)
+            else:
+                self._wheel_teacher_assist.zero_()
+
+            self._hip_torques_applied = torch.clamp(
+                hip_tau + self._hip_assist,
+                -float(self.cfg.hip_effort_limit),
+                float(self.cfg.hip_effort_limit),
+            )
+            self._wheel_torques_applied = torch.clamp(
+                wheel_tau
+                + self._wheel_assist
+                + self._wheel_pitch_assist
+                + self._wheel_teacher_assist,
+                -float(self.cfg.wheel_effort_limit),
+                float(self.cfg.wheel_effort_limit),
+            )
+            # The effort buffer latches in PhysX, so it must be written every step.
+            self._hip_torques_prev = hip_tau.clone()
+            self._wheel_torques_prev = wheel_tau.clone()
+            self._hip_torques = hip_tau
+            self._wheel_torques = wheel_tau
+            self._wheel_targets.zero_()
+            self.applied_wheel_targets.zero_()
+            return
+
         # Recovery: the tuck bias fades out as the body becomes upright, which is
         # the "tuck, drive the wheels, then extend the legs" sequence.  The policy
         # therefore does not have to discover a 1.8-unit hip action from a small
@@ -529,6 +753,13 @@ class FiveBarJointAction(ActionTerm):
         return self._raw_actions - 2.0 * self._action_prev1 + self._action_prev2
 
     def apply_actions(self):
+        if self._torque_control:
+            # Pure torque: write the (clamped) effort targets every control step.
+            # ``_hip_torques_applied`` = policy torque + the decaying training assist.
+            # The knees are still position-controlled by FiveBarEnv._write_knee_targets.
+            self._robot.set_joint_effort_target(self._hip_torques_applied, joint_ids=self._hip_ids)
+            self._robot.set_joint_effort_target(self._wheel_torques_applied, joint_ids=self._wheel_ids)
+            return
         # hips: position targets relative to the nominal stance
         self._robot.set_joint_position_target(self._hip_targets, joint_ids=self._hip_ids)
         # wheels: velocity targets (+ optional heading-hold correction, see below)
@@ -748,6 +979,21 @@ class FiveBarJointAction(ActionTerm):
         if env_ids is None:
             env_ids = slice(None)
         self._raw_actions[env_ids] = 0.0
+        if self._torque_control:
+            # PhysX latches the effort target; clear it on reset so the first step
+            # does not inherit a torque from the previous episode.
+            self._hip_torques[env_ids] = 0.0
+            self._wheel_torques[env_ids] = 0.0
+            self._hip_torques_applied[env_ids] = 0.0
+            self._wheel_torques_applied[env_ids] = 0.0
+            self._hip_assist[env_ids] = 0.0
+            self._wheel_assist[env_ids] = 0.0
+            self._wheel_pitch_assist[env_ids] = 0.0
+            self._wheel_teacher_assist[env_ids] = 0.0
+            self._hip_torques_prev[env_ids] = 0.0
+            self._wheel_torques_prev[env_ids] = 0.0
+            if self._teacher is not None:
+                self._teacher.reset(env_ids)
         # the pose jumps on reset, so the stored leg state is no longer a valid
         # previous sample -- the first post-reset rate is reported as zero
         self._leg_prev_valid[env_ids] = False
@@ -904,6 +1150,48 @@ class FiveBarJointActionCfg(ActionTermCfg):
     #: sets this to the deepest squat so zero action means "hold the tuck".  With
     #: ``lock_hips`` it is the fixed squat pose itself.
     hip_bias: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+
+    # -- pure torque control (hips + wheels) --------------------------------
+    #: Send joint torques instead of position/velocity targets.  The four hips and
+    #: two wheels are torque-controlled; the knees stay position-controlled
+    #: closed-chain followers.  Requires ``lock_hips=True`` so the locked knee pair
+    #: and ``locked_hips`` reference pose remain valid.
+    torque_control: bool = False
+    #: Nm per raw action unit (hips), and Nm per raw action unit (wheels)
+    hip_torque_scale: float = 10.0
+    wheel_torque_scale: float = 1.0
+    #: hard clamp applied inside the action term (PhysX does not guarantee that the
+    #: external effort target is clipped by ``effort_limit_sim``)
+    hip_effort_limit: float = 40.0
+    wheel_effort_limit: float = 3.69
+    #: optional slew limit on the commanded torque (Nm per control step; 0 = off).
+    #: The main stability knob when the hip torque fights the knee closed chain.
+    max_hip_torque_delta: float = 0.0
+    max_wheel_torque_delta: float = 0.0
+    #: Training-only PD assist added to the policy hip torque, so the very first
+    #: updates start from a held squat instead of a free-fall.  It decays linearly
+    #: to zero over ``hip_assist_decay_steps`` control steps (0 = constant assist;
+    #: set kp=kd=0 for deployment/play).
+    hip_assist_kp: float = 0.0
+    hip_assist_kd: float = 0.0
+    hip_assist_decay_steps: int = 0
+    #: training-only wheel damping torque ``-kd * wheel_vel`` (Nm per rad/s), matching
+    #: the original velocity-servo damping so zero action does not free-roll.  It uses
+    #: the same decay schedule as the hip assist and must be 0 for play.
+    wheel_assist_kd: float = 0.0
+    #: training-only inverted-pendulum pitch assist on the wheels: a common torque
+    #: ``-(kp*pitch + kd*pitch_rate)``.  Gives long episodes from the first update so
+    #: PPO can learn the balance instead of only seeing 0.3 s falls.  Must be 0 for play.
+    wheel_pitch_assist_kp: float = 0.0
+    wheel_pitch_assist_kd: float = 0.0
+    #: training-only teacher: a ``--task squat`` checkpoint whose 2 wheel velocity
+    #: actions are converted to a wheel torque with ``kd * (v* - v)``.  Empty = off.
+    teacher_checkpoint: str = ""
+    teacher_wheel_scale: float = 5.0
+    teacher_clip_actions: float = 6.0
+    teacher_servo_kd: float = 2.0
+    #: teacher observation needs the squat base-height target (m); set by env_squat
+    teacher_base_height: float = 0.173
     #: fade the hip_bias out as uprightness rises: tuck while fallen, nominal stance
     #: once upright.  This is the final "extend the legs" phase of recovery.
     dynamic_hip_bias: bool = False

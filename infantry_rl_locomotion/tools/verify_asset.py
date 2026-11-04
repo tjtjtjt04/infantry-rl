@@ -24,17 +24,13 @@ import sys
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
-INFANTRY_USD = PROJECT_DIR / "assets" / "infantry-rl" / "infantry_rl.usd"
 CHASSIS_USD = PROJECT_DIR / "chassis-rl" / "urdf" / "chassis-rl" / "chassis-rl.usd"
-INFANTRY_DATA = PROJECT_DIR / "robot_data"
-CHASSIS_DATA = PROJECT_DIR / "robot_data" / "chassis-rl"
+DATA_DIR = PROJECT_DIR / "robot_data" / "chassis-rl"
 
 from isaaclab.app import AppLauncher
 
-parser = argparse.ArgumentParser(description="Verify a converted robot USD.")
-parser.add_argument("--asset", choices=("infantry", "chassis"), default="infantry",
-                    help="which measured config / wheel-joint naming to verify against")
-parser.add_argument("--usd", type=Path, default=None)
+parser = argparse.ArgumentParser(description="Verify the chassis-rl USD.")
+parser.add_argument("--usd", type=Path, default=CHASSIS_USD)
 parser.add_argument("--report", type=Path, default=PROJECT_DIR / "tools" / "verify_asset_report.json")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -46,15 +42,7 @@ from pxr import Usd, UsdPhysics  # noqa: E402
 
 SIDES = ("left", "right")
 ROLES = ("front_hip", "back_hip", "front_knee", "back_knee")
-DATA_DIR = CHASSIS_DATA if args_cli.asset == "chassis" else INFANTRY_DATA
-DEFAULT_USD = CHASSIS_USD if args_cli.asset == "chassis" else INFANTRY_USD
-if args_cli.usd is None:
-    args_cli.usd = DEFAULT_USD
-if args_cli.asset == "chassis":
-    # chassis-rl: joint names differ from link names
-    WHEEL_JOINTS = {"left": "wheel_left", "right": "wheel_right"}
-else:
-    WHEEL_JOINTS = {side: f"{side}_wheel" for side in SIDES}
+WHEEL_JOINTS = {"left": "wheel_left", "right": "wheel_right"}
 EXPECTED_REVOLUTE = {
     f"{side}_{role}": (side, role) for side in SIDES for role in ROLES
 } | {WHEEL_JOINTS[side]: (side, "wheel") for side in SIDES}

@@ -27,7 +27,7 @@ Run with the Isaac Lab Python (numpy only; no Kit):
 
     C:/Users/32560/.conda/envs/isaaclab/python.exe tools/measure_chassis_asset.py
 
-Then convert the USD and train with ``INFANTRY_RL_ASSET=chassis``.
+Then convert the USD with ``build_asset.py`` and train with ``train.py``.
 """
 
 from __future__ import annotations
@@ -275,8 +275,8 @@ def main() -> int:
         path.write_text(json.dumps(data[key], indent=2) + "\n", encoding="utf-8")
         print(f"[write] {path}")
     print(
-        "\n[note] use INFANTRY_RL_ASSET=chassis so robot_model reads "
-        f"{args.out} and {PROJECT_DIR / 'chassis-rl' / 'urdf' / 'chassis-rl' / 'chassis-rl.usd'}"
+        f"\n[note] robot_model now reads {args.out} and "
+        f"{PROJECT_DIR / 'chassis-rl' / 'urdf' / 'chassis-rl' / 'chassis-rl.usd'}"
     )
     return 0
 

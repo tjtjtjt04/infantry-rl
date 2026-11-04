@@ -17,17 +17,25 @@ FOLDED into the first Linear layer, so the ONNX graph contains only
 The ONNX output is the raw policy mean.  It does NOT include the environment's
 post-processing:
 
-    squat task:  wheel_target = 5.0 * clip(action, -12, 12)   [rad/s]
-                 hips are a constant locked pose
-                 knees are NOT in the policy: solve the five-bar closure at 50 Hz
-                 obs scaling: base_ang_vel * 0.25, wheel_vel * 0.1
-                 control rate: 50 Hz (decimation 4 x 200 Hz physics)
+    squat task:       wheel_target = 5.0 * clip(action, -6, 6)    [rad/s]
+                      hips are a constant locked pose
+                      knees are NOT in the policy: solve the five-bar closure at 50 Hz
+                      obs scaling: base_ang_vel * 0.25, wheel_vel * 0.1
+    squat_torque:     tau = clamp(clip(action, -4, 4) * [10,10,10,10,1,1],
+                                  [-40]*4 + [-3.69]*2, [40]*4 + [3.69]*2) [Nm]
+                      hips/wheels are pure torque; knees remain position-controlled
+                      obs scaling: base_ang_vel * 0.25, hip_vel * 0.1,
+                                   leg_rates * 0.5, wheel_vel * 0.1
+    control rate:     50 Hz (decimation 4 x 200 Hz physics)
 
 Examples::
 
     C:/Users/32560/.conda/envs/isaaclab/python.exe tools/export_policy_onnx.py ^
       --checkpoint logs/rsl_rl/infantry_rl_squat/2026-11-03_23-02-16_chassis_squat_s1_cont/model_598.pt ^
       --output exports/chassis_squat_model_598.onnx
+
+    # pure-torque squat (42-D obs, 6-D action)
+    ... --deploy-kind squat_torque --output exports/chassis_squat_torque.onnx
 
     # keep the normaliser as explicit Sub/Div ops (for inspection)
     ... --no-fold-normalizer --output policy_raw.onnx
@@ -127,6 +135,10 @@ def main() -> int:
     parser.add_argument("--eps", type=float, default=1e-2,
                         help="rsl_rl EmpiricalNormalization eps (default 1e-2)")
     parser.add_argument("--opset", type=int, default=17)
+    parser.add_argument("--deploy-kind", choices=("squat", "squat_torque"), default="squat",
+                        help="which post-processing sidecar to write")
+    parser.add_argument("--clip-actions", type=float, default=None,
+                        help="PPO clip_actions (default: squat 6.0, squat_torque 4.0)")
     parser.add_argument("--no-fold-normalizer", action="store_true",
                         help="keep Sub/Div ops instead of folding them into layer 0")
     parser.add_argument("--skip-check", action="store_true",
@@ -142,6 +154,16 @@ def main() -> int:
     iteration = int(ckpt.get("iter", -1))
 
     obs_dim, action_dim, hidden_dims = infer_mlp(actor_sd)
+    expected_dim = 2 if args.deploy_kind == "squat" else 6
+    if action_dim != expected_dim:
+        raise ValueError(
+            f"actor outputs {action_dim} dims but --deploy-kind={args.deploy_kind} expects {expected_dim}"
+        )
+    clip_actions = (
+        float(args.clip_actions)
+        if args.clip_actions is not None
+        else (6.0 if args.deploy_kind == "squat" else 4.0)
+    )
     mean = actor_sd["obs_normalizer._mean"].float().cpu()
     std = actor_sd["obs_normalizer._std"].float().cpu()
     denom = std + float(args.eps)
@@ -234,16 +256,36 @@ def main() -> int:
         "input_names": ["obs"],
         "output_names": ["action"],
         "output_is": "deterministic policy mean (raw action, before clip/scale)",
-        "squat_postprocess": {
-            "clip_actions": 12.0,
+        "deploy_kind": args.deploy_kind,
+        "clip_actions": clip_actions,
+    }
+    if args.deploy_kind == "squat":
+        meta["squat_postprocess"] = {
             "wheel_scale": 5.0,
-            "wheel_target_rad_s": "5.0 * clip(action, -12, 12)",
+            "wheel_target_rad_s": f"5.0 * clip(action, {-clip_actions:g}, {clip_actions:g})",
             "hips": "constant locked pose",
             "knees": "five-bar closure solved at 50 Hz, not in ONNX",
             "control_rate_hz": 50.0,
             "obs_scales": {"base_ang_vel": 0.25, "wheel_vel": 0.1},
-        },
-    }
+        }
+    else:
+        meta["squat_torque_postprocess"] = {
+            "action_scale_nm": [10.0, 10.0, 10.0, 10.0, 1.0, 1.0],
+            "torque_nm": (
+                f"clamp(clip(action, {-clip_actions:g}, {clip_actions:g}) * "
+                "[10,10,10,10,1,1], [-40,-40,-40,-40,-3.69,-3.69], [40,40,40,40,3.69,3.69])"
+            ),
+            "hips": "pure torque (Nm)",
+            "wheels": "pure torque (Nm)",
+            "knees": "position-controlled five-bar closure at 50 Hz, not in ONNX",
+            "control_rate_hz": 50.0,
+            "obs_scales": {
+                "base_ang_vel": 0.25,
+                "hip_vel": 0.1,
+                "leg_rates": 0.5,
+                "wheel_vel": 0.1,
+            },
+        }
     meta_path = output.with_suffix(".json")
     meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     print(f"[onnx] metadata       : {meta_path}")

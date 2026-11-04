@@ -10,8 +10,9 @@ It imports Isaac Lab, so it must be imported **after** ``AppLauncher`` has
 started Kit.  Anything that has to be read before that (CLI parsing) lives in
 ``train.py`` / ``play.py`` itself.
 
-The task-specific MDP configs live in ``env_locomotion.py`` / ``env_balance.py``;
-the PPO runner configs live in ``agent.py``.
+The task-specific MDP configs live in ``env_squat.py``; the shared scene/action/
+loop-closure environment lives in ``env_base.py``; the PPO runner configs live in
+``agent.py``.
 """
 
 from __future__ import annotations
@@ -37,8 +38,6 @@ from robot_model import (
 # --------------------------------------------------------------------------- #
 PROJECT_DIR: Path = Path(__file__).resolve().parent
 ASSETS_DIR: Path = PROJECT_DIR / "assets"
-ROBOT_ASSET_DIR: Path = ASSETS_DIR / "infantry-rl"
-ROBOT_DATA_DIR: Path = PROJECT_DIR / "robot_data"
 GROUND_USD_PATH: Path = ASSETS_DIR / "ground" / "ground.usda"
 DEFAULT_LOG_ROOT: Path = PROJECT_DIR / "logs" / "rsl_rl"
 
@@ -46,98 +45,44 @@ DEFAULT_LOG_ROOT: Path = PROJECT_DIR / "logs" / "rsl_rl"
 # Task names
 # --------------------------------------------------------------------------- #
 #: canonical task names used by train.py / play.py
-TASKS: tuple[str, ...] = (
-    "locomotion",
-    "balance",
-    "squat",
-    "turning",
-    "braking",
-    "teleop",
-    "recovery",
-    "stand",
-)
+TASKS: tuple[str, ...] = ("squat", "squat_torque")
 
 #: old gym IDs still accepted on the command line
 TASK_ALIASES: dict[str, str] = {
-    "Infantry-RL-Locomotion-v0": "locomotion",
-    "Infantry-RL-Locomotion-Play-v0": "locomotion",
-    "Infantry-RL-Balance-v0": "balance",
-    "Infantry-RL-Balance-Play-v0": "balance",
     "Infantry-RL-Squat-v0": "squat",
     "Infantry-RL-Squat-Play-v0": "squat",
-    "Infantry-RL-Turning-v0": "turning",
-    "Infantry-RL-Turning-Play-v0": "turning",
-    "Infantry-RL-Braking-v0": "braking",
-    "Infantry-RL-Braking-Play-v0": "braking",
-    "Infantry-RL-Teleop-v0": "teleop",
-    "Infantry-RL-Teleop-Play-v0": "teleop",
-    "Infantry-RL-Recovery-v0": "recovery",
-    "Infantry-RL-Recovery-Play-v0": "recovery",
-    "Infantry-RL-Stand-v0": "stand",
-    "Infantry-RL-Stand-Play-v0": "stand",
+    "Infantry-RL-SquatTorque-v0": "squat_torque",
+    "Infantry-RL-SquatTorque-Play-v0": "squat_torque",
 }
 
-#: rsl_rl experiment folder names (kept identical to the original workspace)
+#: rsl_rl experiment folder names
 EXPERIMENT_NAMES: dict[str, str] = {
-    "locomotion": "infantry_rl_locomotion",
-    "balance": "infantry_rl_balance",
     "squat": "infantry_rl_squat",
-    "turning": "infantry_rl_turning",
-    "braking": "infantry_rl_braking",
-    "teleop": "infantry_rl_teleop",
-    "recovery": "infantry_rl_recovery",
-    "stand": "infantry_rl_stand",
+    "squat_torque": "infantry_rl_squat_torque",
 }
 
-#: default training schedule, identical to the source runner configs.
-#: The turning task is normally warm-started from a locomotion checkpoint, so the
-#: default is a fine-tuning budget rather than a from-scratch one.
 DEFAULT_ITERATIONS: dict[str, int] = {
-    "locomotion": 8000,
-    "balance": 500,
     "squat": 1000,
-    "turning": 3000,
-    "braking": 2000,
-    "teleop": 2000,
-    "recovery": 2500,
-    "stand": 500,
+    "squat_torque": 1000,
 }
 DEFAULT_HORIZON: dict[str, int] = {
-    "locomotion": 48,
-    "balance": 24,
     "squat": 24,
-    "turning": 48,
-    "braking": 48,
-    "teleop": 48,
-    "recovery": 48,
-    "stand": 48,
+    "squat_torque": 24,
 }
 DEFAULT_NUM_ENVS: dict[str, int] = {
-    "locomotion": 1024,
-    "balance": 1024,
     "squat": 1024,
-    "turning": 1024,
-    "braking": 1024,
-    "teleop": 1024,
-    "recovery": 1024,
-    "stand": 1024,
+    "squat_torque": 1024,
 }
 DEFAULT_PLAY_NUM_ENVS: dict[str, int] = {
-    "locomotion": 1,
-    "balance": 16,
     "squat": 16,
-    "turning": 1,
-    "braking": 1,
-    "teleop": 1,
-    "recovery": 1,
-    "stand": 1,
+    "squat_torque": 16,
 }
 
 
 def normalize_task(name: str | None) -> str:
     """Map a CLI task name / old gym ID to a canonical task name."""
     if name is None or name == "":
-        return "locomotion"
+        return "squat"
     if name in TASK_ALIASES:
         return TASK_ALIASES[name]
     if name not in TASKS:
@@ -346,6 +291,10 @@ for _wheel in WHEEL_ORDER:
 #: root height (m) at which the nominal stance rests with the wheels on the ground
 NOMINAL_BASE_HEIGHT = nominal_base_height()
 
+#: hardware effort limits used by both the implicit actuators and the torque action
+HIP_EFFORT_LIMIT = 40.0
+WHEEL_EFFORT_LIMIT = 3.69
+
 
 INFANTRY_RL_CFG = ArticulationCfg(
     prim_path="{ENV_REGEX_NS}/Robot",
@@ -378,7 +327,7 @@ INFANTRY_RL_CFG = ArticulationCfg(
         # the two hip motors per leg: position controlled
         "hips": ImplicitActuatorCfg(
             joint_names_expr=HIP_JOINT_REGEX,
-            effort_limit_sim=40.0,
+            effort_limit_sim=HIP_EFFORT_LIMIT,
             velocity_limit_sim=16.755,
             stiffness=200.0,
             damping=5.0,
@@ -387,7 +336,7 @@ INFANTRY_RL_CFG = ArticulationCfg(
         # passive knee followers, driven every control step by the loop solver
         "knees": ImplicitActuatorCfg(
             joint_names_expr=KNEE_JOINT_REGEX,
-            effort_limit_sim=40.0,
+            effort_limit_sim=HIP_EFFORT_LIMIT,
             velocity_limit_sim=16.755,
             stiffness=400.0,
             damping=10.0,
@@ -396,13 +345,24 @@ INFANTRY_RL_CFG = ArticulationCfg(
         # wheels: velocity controlled, damping acts as the motor brake
         "wheels": ImplicitActuatorCfg(
             joint_names_expr=WHEEL_JOINT_REGEX,
-            effort_limit_sim=3.69,
+            effort_limit_sim=WHEEL_EFFORT_LIMIT,
             velocity_limit_sim=61.471,
             stiffness=0.0,
             damping=2.0,
             armature=0.001,
         ),
     },
+)
+
+#: Pure-torque variant for the `squat_torque` task: hips and wheels have no implicit
+#: PD (``set_joint_effort_target`` is then the joint torque); the knees keep their
+#: position servo because they are the closed-chain followers.
+INFANTRY_RL_TORQUE_CFG = INFANTRY_RL_CFG.replace(
+    actuators={
+        "hips": INFANTRY_RL_CFG.actuators["hips"].replace(stiffness=0.0, damping=0.0),
+        "knees": INFANTRY_RL_CFG.actuators["knees"].replace(),
+        "wheels": INFANTRY_RL_CFG.actuators["wheels"].replace(stiffness=0.0, damping=0.0),
+    }
 )
 
 
@@ -417,17 +377,18 @@ __all__ = [
     "EXPERIMENT_NAMES",
     "GROUND_USD_MARKER",
     "GROUND_USD_PATH",
+    "HIP_EFFORT_LIMIT",
     "HIP_JOINT_REGEX",
     "HIP_ORDER",
     "INFANTRY_RL_CFG",
+    "INFANTRY_RL_TORQUE_CFG",
     "KNEE_JOINT_REGEX",
     "KNEE_ORDER",
     "NOMINAL_BASE_HEIGHT",
     "PROJECT_DIR",
-    "ROBOT_ASSET_DIR",
-    "ROBOT_DATA_DIR",
     "TASKS",
     "TASK_ALIASES",
+    "WHEEL_EFFORT_LIMIT",
     "WHEEL_JOINT_REGEX",
     "WHEEL_ORDER",
     "ensure_ground_usd",

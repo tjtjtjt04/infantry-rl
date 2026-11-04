@@ -34,40 +34,24 @@ from config import EXPERIMENT_NAMES
 # --------------------------------------------------------------------------- #
 # Locomotion
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# Shared PPO base for the two squat tasks
+# --------------------------------------------------------------------------- #
 @configclass
-class InfantryLocomotionPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+class InfantryPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     seed = 42
-    # 48 steps x 1024 envs = 49k samples per iteration.  A longer rollout gives much
-    # lower-variance advantage estimates, and the extra samples cost no additional
-    # CPU-side work per environment step (that per-step overhead dominates here).
-    num_steps_per_env = 48
-    max_iterations = 8000
-    # 50 (not 100): the PhysX-GPU crashes land every few minutes at this speed range,
-    # so the checkpoint interval is what sets how much work a crash can throw away.
+    num_steps_per_env = 24
+    max_iterations = 1000
     save_interval = 50
-    experiment_name = EXPERIMENT_NAMES["locomotion"]
+    experiment_name = EXPERIMENT_NAMES["squat"]
     run_name = ""
     obs_groups = {"actor": ["policy"], "critic": ["policy"]}
-    # the raw Gaussian policy is unbounded; clip so a wild early policy cannot command
-    # absurd wheel speeds (the action term multiplies by wheel_scale = 5 rad/s).
-    #
-    # 12 -> 60 rad/s -> 4.08 m/s, just under the wheel velocity limit (61.471 rad/s).
-    # It used to be 4 (20 rad/s = 1.36 m/s), which HARD-CAPPED the reachable speed:
-    # no amount of training could track a 3 m/s command.  Raising the clip does not
-    # change the meaning of an existing checkpoint -- a policy trained on [0.2, 1.2]
-    # outputs |a| < 4, so resuming from model_1100.pt behaves identically.
-    # Note this is a clip on the RAW action; the hips are additionally clamped by
-    # hip_range (0.45 rad), so only the wheel channels are affected by the change.
-    clip_actions = 12.0
+    #: 6 raw units * 5 rad/s = 30 rad/s at the wheel (squat position mode)
+    clip_actions = 6.0
+
     actor = RslRlMLPModelCfg(
-        # 128-128-64 is enough for a 35-dim observation / 6-dim action, and keeps the
-        # per-iteration GPU work (and memory pressure) low on an 8 GB laptop.
         hidden_dims=[128, 128, 64],
         activation="elu",
-        # The observation dimensions span roughly 0.1 .. 4, a 40x spread that makes
-        # the raw MLP badly conditioned.  rsl_rl inserts an ``EmpiricalNormalization``
-        # module whose running mean/std are part of the state dict, so a checkpoint
-        # trained with this False cannot be resumed strictly.  Keep it True.
         obs_normalization=True,
         distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=0.5),
     )
@@ -80,23 +64,11 @@ class InfantryLocomotionPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        # 0.001 (v1.0.5).  History of this number, all measured:
-        #   0.015 -> std runaway to 168 (pure noise policy)
-        #   0.005 -> std climbed to the clamp ceiling 1.0
-        #   0.001 -> sigma settles around 0.2, the useful exploration band
-        # The hard clamp in clamp_policy_std([0.06, 0.4]) is the safety net; the
-        # coefficient is chosen so the equilibrium sits strictly inside it.
         entropy_coef=0.003,
-        # 8 epochs: with the adaptive KL schedule the extra passes are guarded.
         num_learning_epochs=8,
-        # 4 minibatches x 8 epochs = 32 gradient steps per rollout.  Measured:
-        #   8 minibatches -> 2.14 s/iteration -> 22,993 samples/s
-        #   4 minibatches -> ~1.83 s/iteration -> ~26,800 samples/s
         num_mini_batches=4,
         learning_rate=1.0e-3,
         schedule="adaptive",
-        # 0.995 doubles the effective horizon to ~4 s, which is the scale of the
-        # failures we care about (slow lean, leg-angle drift).
         gamma=0.995,
         lam=0.95,
         desired_kl=0.01,
@@ -105,165 +77,21 @@ class InfantryLocomotionPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
 
 @configclass
-class InfantryLocomotionPPORunnerCfg_PLAY(InfantryLocomotionPPORunnerCfg):
+class InfantryPPORunnerCfg_PLAY(InfantryPPORunnerCfg):
     def __post_init__(self):
         super().__post_init__()
         self.max_iterations = 0
         self.num_steps_per_env = 24
 
 
-# --------------------------------------------------------------------------- #
-# Turning (direct (vx, wz) commands)
-# --------------------------------------------------------------------------- #
 @configclass
-class InfantryTurningPPORunnerCfg(InfantryLocomotionPPORunnerCfg):
-    """PPO settings for the turning task.
-
-    The network, observation normalisation and PPO hyperparameters are inherited from
-    locomotion unchanged.  That is deliberate: the observation (35) and action (6)
-    dimensions are identical, so the same actor/critic can be warm-started from a
-    locomotion checkpoint and only the command distribution changes.
-    """
-
-    experiment_name = EXPERIMENT_NAMES["turning"]
-    #: fine-tuning budget; the task normally resumes from a locomotion checkpoint
-    max_iterations = 3000
-
-
-@configclass
-class InfantryTurningPPORunnerCfg_PLAY(InfantryTurningPPORunnerCfg):
-    def __post_init__(self):
-        super().__post_init__()
-        self.max_iterations = 0
-        self.num_steps_per_env = 24
-
-
-# --------------------------------------------------------------------------- #
-# Braking (drive at a target speed, then emergency stop)
-# --------------------------------------------------------------------------- #
-@configclass
-class InfantryBrakingPPORunnerCfg(InfantryLocomotionPPORunnerCfg):
-    """PPO settings for the braking task.
-
-    Same network and observation dimensions as locomotion/turning, so a checkpoint can
-    be warm-started.  The task is shorter (9 s episodes) and the brake command creates
-    a large one-step velocity error, so the inherited adaptive learning rate is kept --
-    a lower rate would slow the reaction to that step.
-    """
-
-    experiment_name = EXPERIMENT_NAMES["braking"]
-    max_iterations = 2000
-
-
-@configclass
-class InfantryBrakingPPORunnerCfg_PLAY(InfantryBrakingPPORunnerCfg):
-    def __post_init__(self):
-        super().__post_init__()
-        self.max_iterations = 0
-        self.num_steps_per_env = 24
-
-
-# --------------------------------------------------------------------------- #
-# Unified teleop (drive + turn + in-place + stop, direct (vx, wz))
-# --------------------------------------------------------------------------- #
-@configclass
-class InfantryTeleopPPORunnerCfg(InfantryTurningPPORunnerCfg):
-    """PPO settings for the unified teleop task.
-
-    The observation (35), action (6) and network are identical to turning, so the
-    turning s1 checkpoint is a valid warm start.  The task is a fine-tune of the
-    command distribution (stops + reverse), not a from-scratch run; 2000 iterations
-    is the default budget, and the README suggests splitting it into a forward
-    stage and a short reverse stage.
-    """
-
-    experiment_name = EXPERIMENT_NAMES["teleop"]
-    max_iterations = 2000
-
-
-@configclass
-class InfantryTeleopPPORunnerCfg_PLAY(InfantryTeleopPPORunnerCfg):
-    def __post_init__(self):
-        super().__post_init__()
-        self.max_iterations = 0
-        self.num_steps_per_env = 24
-
-
-# --------------------------------------------------------------------------- #
-# Fall recovery (front/back falls only)
-# --------------------------------------------------------------------------- #
-@configclass
-class InfantryRecoveryPPORunnerCfg(InfantryLocomotionPPORunnerCfg):
-    """PPO settings for the fall-recovery task.
-
-    The 35-dim observation and 6-dim action are the same as teleop, so the final
-    teleop checkpoint can warm-start recovery (and deployment can switch policies
-    without changing the interface).  The task is different enough that it usually
-    needs 2000-3000 iterations, starting with easy falls and widening the pitch.
-    """
-
-    experiment_name = EXPERIMENT_NAMES["recovery"]
-    max_iterations = 2500
-    #: Recovery does not need 3 m/s wheel speeds.  A teleop checkpoint outputs
-    #: large wheel commands in fallen states, and the default 12 clip lets that
-    #: launch the robot.  Four raw units = 20 rad/s at the wheel, enough for the
-    #: tuck/wheel/extend strategy while keeping exploration tame.
-    clip_actions = 4.0
-
-
-@configclass
-class InfantryRecoveryPPORunnerCfg_PLAY(InfantryRecoveryPPORunnerCfg):
-    def __post_init__(self):
-        super().__post_init__()
-        self.max_iterations = 0
-        self.num_steps_per_env = 24
-
-
-# --------------------------------------------------------------------------- #
-# Stand from squat (recovery phase 2)
-# --------------------------------------------------------------------------- #
-@configclass
-class InfantryStandPPORunnerCfg(InfantryLocomotionPPORunnerCfg):
-    """PPO settings for standing up from the upright squat.
-
-    This is a short fine-tune; the teleop checkpoint already balances and the
-    stand task only requires extending the legs and holding the height.  Recovery's
-    action clip (4 raw units = 20 rad/s) is enough here too.
-    """
-
-    experiment_name = EXPERIMENT_NAMES["stand"]
-    max_iterations = 500
-    clip_actions = 2.0
-
-
-@configclass
-class InfantryStandPPORunnerCfg_PLAY(InfantryStandPPORunnerCfg):
-    def __post_init__(self):
-        super().__post_init__()
-        self.max_iterations = 0
-        self.num_steps_per_env = 24
-
-
-# --------------------------------------------------------------------------- #
-# Squat balance (hips locked, wheels only)
-# --------------------------------------------------------------------------- #
-@configclass
-class InfantrySquatPPORunnerCfg(InfantryLocomotionPPORunnerCfg):
-    """PPO settings for the locked-squat balance task.
-
-    The action is only two-dimensional (the two wheel speeds), so this is a small
-    from-scratch task rather than a fine-tune of a locomotion checkpoint.  The
-    observation normaliser stays on (unlike the legacy balance config): the
-    observation mixes gravity (order 1), wheel speeds (order 10) and the constant
-    locked-hip offset, and normalising them keeps the first PPO updates stable.
-    """
+class InfantrySquatPPORunnerCfg(InfantryPPORunnerCfg):
+    """PPO settings for the position/velocity squat (2 wheel actions)."""
 
     experiment_name = EXPERIMENT_NAMES["squat"]
     max_iterations = 1000
     num_steps_per_env = 24
     save_interval = 50
-    #: 6 raw units * 5 rad/s = 30 rad/s (~2 m/s) at the wheel, well inside the
-    #: 61.47 rad/s hardware limit but plenty for balance corrections.
     clip_actions = 6.0
 
 
@@ -275,48 +103,30 @@ class InfantrySquatPPORunnerCfg_PLAY(InfantrySquatPPORunnerCfg):
         self.num_steps_per_env = 24
 
 
-# --------------------------------------------------------------------------- #
-# Balance (legacy task)
-# --------------------------------------------------------------------------- #
 @configclass
-class InfantryBalancePPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    seed = 42
+class InfantrySquatTorquePPORunnerCfg(InfantrySquatPPORunnerCfg):
+    """PPO settings for the pure-torque squat (6 torque actions).
+
+    Torque exploration is much more violent than the position/velocity squat:
+    0.5 * 10 Nm = 5 Nm of hip noise destabilises the low stance before PPO can
+    learn to hold it.  Start small; the Gaussian std is learnable and grows.
+    """
+
+    experiment_name = EXPERIMENT_NAMES["squat_torque"]
+    max_iterations = 1000
     num_steps_per_env = 24
-    max_iterations = 500
     save_interval = 50
-    experiment_name = EXPERIMENT_NAMES["balance"]
-    run_name = ""
-    obs_groups = {"actor": ["policy"], "critic": ["policy"]}
     clip_actions = 4.0
     actor = RslRlMLPModelCfg(
         hidden_dims=[128, 128, 64],
         activation="elu",
-        obs_normalization=False,
-        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=0.5),
-    )
-    critic = RslRlMLPModelCfg(
-        hidden_dims=[128, 128, 64],
-        activation="elu",
-        obs_normalization=False,
-    )
-    algorithm = RslRlPpoAlgorithmCfg(
-        value_loss_coef=1.0,
-        use_clipped_value_loss=True,
-        clip_param=0.2,
-        entropy_coef=0.005,
-        num_learning_epochs=5,
-        num_mini_batches=4,
-        learning_rate=1.0e-3,
-        schedule="adaptive",
-        gamma=0.99,
-        lam=0.95,
-        desired_kl=0.01,
-        max_grad_norm=1.0,
+        obs_normalization=True,
+        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=0.1),
     )
 
 
 @configclass
-class InfantryBalancePPORunnerCfg_PLAY(InfantryBalancePPORunnerCfg):
+class InfantrySquatTorquePPORunnerCfg_PLAY(InfantrySquatTorquePPORunnerCfg):
     def __post_init__(self):
         super().__post_init__()
         self.max_iterations = 0
@@ -324,23 +134,15 @@ class InfantryBalancePPORunnerCfg_PLAY(InfantryBalancePPORunnerCfg):
 
 
 def make_agent_cfg(task: str, play: bool = False) -> RslRlOnPolicyRunnerCfg:
-    """Return a fresh runner config for the requested task."""
-    if task == "locomotion":
-        return InfantryLocomotionPPORunnerCfg_PLAY() if play else InfantryLocomotionPPORunnerCfg()
-    if task == "turning":
-        return InfantryTurningPPORunnerCfg_PLAY() if play else InfantryTurningPPORunnerCfg()
-    if task == "braking":
-        return InfantryBrakingPPORunnerCfg_PLAY() if play else InfantryBrakingPPORunnerCfg()
-    if task == "teleop":
-        return InfantryTeleopPPORunnerCfg_PLAY() if play else InfantryTeleopPPORunnerCfg()
-    if task == "recovery":
-        return InfantryRecoveryPPORunnerCfg_PLAY() if play else InfantryRecoveryPPORunnerCfg()
-    if task == "stand":
-        return InfantryStandPPORunnerCfg_PLAY() if play else InfantryStandPPORunnerCfg()
-    if task == "balance":
-        return InfantryBalancePPORunnerCfg_PLAY() if play else InfantryBalancePPORunnerCfg()
+    """Return a fresh runner config for the requested squat task."""
     if task == "squat":
         return InfantrySquatPPORunnerCfg_PLAY() if play else InfantrySquatPPORunnerCfg()
+    if task == "squat_torque":
+        return (
+            InfantrySquatTorquePPORunnerCfg_PLAY()
+            if play
+            else InfantrySquatTorquePPORunnerCfg()
+        )
     raise ValueError(f"unknown task {task!r}")
 
 
@@ -697,7 +499,7 @@ def _command_range(runner) -> tuple[float | None, float | None]:
 def _is_heading_task(runner) -> bool:
     """Whether the active command derives ``wz`` from a heading target.
 
-    The locomotion task does (so a heading-error line is meaningful); the turning task
+    The squat task does (so a heading-error line is meaningful);
     samples ``wz`` directly (so that line would show a misleading 0 deg).  Unknown
     setups default to True to keep the original console output.
     """
@@ -996,22 +798,12 @@ def filter_iteration_console(
         )
 __all__ = [
     "HIDDEN_CONSOLE_TERMS",
-    "InfantryBalancePPORunnerCfg",
-    "InfantryBalancePPORunnerCfg_PLAY",
-    "InfantryBrakingPPORunnerCfg",
-    "InfantryBrakingPPORunnerCfg_PLAY",
-    "InfantryLocomotionPPORunnerCfg",
-    "InfantryLocomotionPPORunnerCfg_PLAY",
-    "InfantryRecoveryPPORunnerCfg",
-    "InfantryRecoveryPPORunnerCfg_PLAY",
+    "InfantryPPORunnerCfg",
+    "InfantryPPORunnerCfg_PLAY",
     "InfantrySquatPPORunnerCfg",
     "InfantrySquatPPORunnerCfg_PLAY",
-    "InfantryStandPPORunnerCfg",
-    "InfantryStandPPORunnerCfg_PLAY",
-    "InfantryTeleopPPORunnerCfg",
-    "InfantryTeleopPPORunnerCfg_PLAY",
-    "InfantryTurningPPORunnerCfg",
-    "InfantryTurningPPORunnerCfg_PLAY",
+    "InfantrySquatTorquePPORunnerCfg",
+    "InfantrySquatTorquePPORunnerCfg_PLAY",
     "apply_cli_overrides",
     "clamp_policy_std",
     "filter_iteration_console",

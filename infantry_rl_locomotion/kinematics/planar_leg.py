@@ -1,8 +1,8 @@
-"""Exact planar kinematics of the infantry-rl five-bar legs, plus the loop solver.
+"""Exact planar kinematics of the chassis-rl five-bar legs, plus the loop solver.
 
 WHAT THIS FILE IS FOR
 ---------------------
-``infantry-rl-sim.urdf`` describes each leg as a TREE plus a non-standard
+``chassis-rl.urdf`` describes each leg as a TREE plus a non-standard
 ``<loop_joint>`` that closes it into a parallel five-bar linkage.  Neither URDF nor
 a PhysX articulation can express a closed chain -- measured on this machine
 (Isaac Sim 5.1.0.0), importing the URDF gives an articulation with exactly **10**

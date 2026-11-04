@@ -50,7 +50,8 @@ from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.utils import configclass
 
 import mdp
-from env_locomotion import (
+from config import HIP_EFFORT_LIMIT, INFANTRY_RL_TORQUE_CFG, WHEEL_EFFORT_LIMIT
+from env_base import (
     ActionsCfg,
     FiveBarEnv,
     NOMINAL_HEIGHT,
@@ -62,6 +63,7 @@ from env_locomotion import (
 from robot_model import (
     HIP_ORDER,
     KNEE_ORDER,
+    WHEEL_ORDER,
     WHEEL_RADIUS,
     hip_axis_height,
     nominal_pose,
@@ -86,14 +88,13 @@ def _env_float(name: str, default: float) -> float:
 #: values are NOT identical on the two sides.
 _NOMINAL = nominal_pose()
 
-#: Deepest feasible locked pose for the selected asset.  ``tools/measure_chassis_asset.py``
-#: writes ``robot_data/chassis-rl/squat_pose.json`` for the new ``chassis-rl`` URDF;
-#: the original infantry-rl asset falls back to its previously validated numbers.
+#: Deepest feasible locked pose, written by ``tools/measure_chassis_asset.py`` to
+#: ``robot_data/chassis-rl/squat_pose.json``.
 _SQUAT = squat_pose()
 _SQUAT_HIPS = _SQUAT["hips"]
 #: right-side joint values are ``sign * left`` for the same physical pose
-#: (+1 for infantry-rl, -1 for chassis-rl's mirrored right leg)
-_RIGHT_HIP_SIGN = float(_SQUAT.get("right_hip_sign", 1.0))
+#: (-1 for chassis-rl's mirrored right leg)
+_RIGHT_HIP_SIGN = float(_SQUAT.get("right_hip_sign", -1.0))
 
 #: Absolute hip angles of the deepest feasible squat, left side (rad, URDF zero pose).
 SQUAT_FRONT_HIP = _env_float("INFANTRY_RL_SQUAT_FRONT_HIP", float(_SQUAT_HIPS["left"]["front_hip"]))
@@ -136,6 +137,28 @@ EPISODE_LENGTH_S = _env_float("INFANTRY_RL_SQUAT_EPISODE", 10.0)
 WHEEL_SCALE = _env_float("INFANTRY_RL_SQUAT_WHEEL_SCALE", 5.0)
 HIP_RANGE = _env_float("INFANTRY_RL_SQUAT_HIP_RANGE", 0.70)
 BASE_FLOOR = _env_float("INFANTRY_RL_SQUAT_BASE_FLOOR", float(_SQUAT.get("base_floor", 0.04)))
+
+#: pure-torque variant (`squat_torque`): raw action unit -> Nm
+HIP_TORQUE_SCALE = _env_float("INFANTRY_RL_SQUAT_HIP_TORQUE_SCALE", 10.0)
+WHEEL_TORQUE_SCALE = _env_float("INFANTRY_RL_SQUAT_WHEEL_TORQUE_SCALE", 1.0)
+TORQUE_HIP_EFFORT_LIMIT = _env_float("INFANTRY_RL_SQUAT_HIP_EFFORT_LIMIT", HIP_EFFORT_LIMIT)
+TORQUE_WHEEL_EFFORT_LIMIT = _env_float("INFANTRY_RL_SQUAT_WHEEL_EFFORT_LIMIT", WHEEL_EFFORT_LIMIT)
+#: training-only PD assist on the hips, decayed to zero so the final policy is pure
+#: torque.  kp/kd match the original implicit hip servo; 0 disables the curriculum.
+HIP_ASSIST_KP = _env_float("INFANTRY_RL_SQUAT_HIP_ASSIST_KP", 200.0)
+HIP_ASSIST_KD = _env_float("INFANTRY_RL_SQUAT_HIP_ASSIST_KD", 5.0)
+HIP_ASSIST_DECAY_STEPS = int(_env_float("INFANTRY_RL_SQUAT_HIP_ASSIST_DECAY_STEPS", 10000.0))
+#: training-only wheel damping (Nm per rad/s), matching the original velocity servo
+WHEEL_ASSIST_KD = _env_float("INFANTRY_RL_SQUAT_WHEEL_ASSIST_KD", 2.0)
+#: training-only inverted-pendulum pitch assist (common wheel torque, Nm/rad and Nm/(rad/s))
+WHEEL_PITCH_ASSIST_KP = _env_float("INFANTRY_RL_SQUAT_WHEEL_PITCH_ASSIST_KP", 25.0)
+WHEEL_PITCH_ASSIST_KD = _env_float("INFANTRY_RL_SQUAT_WHEEL_PITCH_ASSIST_KD", 4.0)
+#: the torque task starts with a gentler reset: a free-torque hip has no PD to catch
+#: the initial pitch, so the first episodes must not start at the corner limit
+TORQUE_RESET_PITCH_DEG = _env_float("INFANTRY_RL_SQUAT_TORQUE_RESET_PITCH_DEG", 1.5)
+TORQUE_RESET_ROLL_DEG = _env_float("INFANTRY_RL_SQUAT_TORQUE_RESET_ROLL_DEG", 0.75)
+#: optional training-only teacher (the existing 2-action squat checkpoint)
+TEACHER_CKPT = os.environ.get("INFANTRY_RL_SQUAT_TEACHER_CKPT", "").strip()
 
 #: The chassis is only 7.6 cm off the ground, so a pitch/roll of ~16 deg already
 #: puts a base-link corner into the ground.  A policy that learns to "tripod" on
@@ -206,7 +229,7 @@ def reset_squat_pose(
 # --------------------------------------------------------------------------- #
 @configclass
 class SquatObservationsCfg:
-    """Observation specifications (26 dims).
+    """Observation specifications (30 dims).
 
     No command term: the task is "hold this pose, do not move".  Heading and planar
     position are fed explicitly for the same reason as the balance task -- without
@@ -238,6 +261,51 @@ class SquatObservationsCfg:
 
         # height error relative to the squat target (helps detect sinking / a stance
         # collapse before the termination fires)
+        base_height = ObsTerm(
+            func=mdp.base_height_rel, params={"target_height": SQUAT_BASE_HEIGHT}
+        )
+
+        def __post_init__(self):
+            self.enable_corruption = False
+            self.concatenate_terms = True
+
+    policy: PolicyCfg = PolicyCfg()
+
+
+@configclass
+class SquatTorqueObservationsCfg:
+    """Observation specifications for the pure-torque squat (42 dims).
+
+    Torque control needs velocity feedback on the actuated hips and on the leg
+    linkage.  ``solved_leg_state`` is replaced by ``measured_leg_state`` because
+    the commanded hip pose is only a reference now; the knee tracking error stays.
+    """
+
+    @configclass
+    class PolicyCfg(ObsGroup):
+        # base state
+        projected_gravity = ObsTerm(func=base_mdp.projected_gravity)
+        base_ang_vel = ObsTerm(func=base_mdp.base_ang_vel, scale=0.25)
+        base_lin_vel = ObsTerm(func=base_mdp.base_lin_vel)
+
+        # where it is / which way it faces (prevents drift and slow spin)
+        heading = ObsTerm(func=mdp.heading_sin_cos, params={"target_heading": TARGET_HEADING})
+        position = ObsTerm(
+            func=mdp.position_error, params={"target_x": TARGET_X, "target_y": TARGET_Y}
+        )
+
+        # posture / linkage state
+        hip_pos_rel_locked = ObsTerm(func=mdp.hip_pos_rel_locked, params={"action_name": "joints"})
+        hip_vel = ObsTerm(func=mdp.hip_vel, params={"action_name": "joints"}, scale=0.1)
+        knee_pos_rel_solved = ObsTerm(func=mdp.knee_pos_rel_solved, params={"action_name": "joints"})
+        measured_leg_state = ObsTerm(func=mdp.measured_leg_state, params={"action_name": "joints"})
+        leg_rates = ObsTerm(func=mdp.leg_rates, params={"action_name": "joints"}, scale=0.5)
+
+        # actuators
+        wheel_vel = ObsTerm(func=mdp.wheel_vel, params={"action_name": "joints"}, scale=0.1)
+        last_action = ObsTerm(func=mdp.last_action_raw, params={"action_name": "joints"})
+
+        # height error relative to the squat target
         base_height = ObsTerm(
             func=mdp.base_height_rel, params={"target_height": SQUAT_BASE_HEIGHT}
         )
@@ -309,6 +377,41 @@ class SquatRewardsCfg:
 
     # -- falling is bad --------------------------------------------------
     fall_penalty = RewTerm(func=mdp.fall_penalty, weight=-50.0)
+
+
+@configclass
+class SquatTorqueRewardsCfg(SquatRewardsCfg):
+    """Rewards for the pure-torque squat.
+
+    The hips are no longer held by a position servo, so the posture terms are the
+    actual holding controller; they are tightened.  ``joint_torques`` is restricted
+    to the policy-actuated hips/wheels so it does not charge the knee PD load that
+    closes the linkage.
+    """
+
+    hip_lock = RewTerm(
+        func=mdp.hip_lock_deviation_abs,
+        weight=-4.0,
+        params={"action_name": "joints", "tolerance": 0.03},
+    )
+    joint_torques = RewTerm(
+        func=mdp.joint_torques_l2,
+        weight=-2.0e-4,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=[*HIP_ORDER, *WHEEL_ORDER])},
+    )
+    action_jerk = RewTerm(
+        func=mdp.action_jerk_l2,
+        weight=-5.0e-3,
+        params={"action_name": "joints"},
+    )
+    hip_vel = RewTerm(
+        func=mdp.joint_vel_l2,
+        weight=-1.0e-3,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=list(HIP_ORDER))},
+    )
+    closure_residual = RewTerm(
+        func=mdp.closure_residual_l2, weight=-2.0e3, params={"action_name": "joints"}
+    )
 
 
 @configclass
@@ -438,15 +541,76 @@ class SquatEnvCfg(ManagerBasedRLEnvCfg):
             f"back {SQUAT_RIGHT_BACK_HIP:+.4f}) rad, L0 {SQUAT_LEG_LENGTH:.5f} m, "
             f"base_z ~{SQUAT_BASE_HEIGHT:.4f} m (offset from nominal {SQUAT_Z_OFFSET:+.4f} m)"
         )
-        print(
-            f"[cfg] squat action        : 2 wheels only (hip lock, wheel_scale={WHEEL_SCALE:g}, "
-            f"hip_range={HIP_RANGE:g}); episode {EPISODE_LENGTH_S:.1f} s; "
-            f"base floor {BASE_FLOOR:.3f} m"
-        )
+        if joints.torque_control:
+            print(
+                f"[cfg] squat action        : pure torque, 4 hips + 2 wheels "
+                f"(hip {HIP_TORQUE_SCALE:g} Nm/unit, wheel {WHEEL_TORQUE_SCALE:g} Nm/unit); "
+                f"episode {EPISODE_LENGTH_S:.1f} s; base floor {BASE_FLOOR:.3f} m"
+            )
+        else:
+            print(
+                f"[cfg] squat action        : 2 wheels only (hip lock, wheel_scale={WHEEL_SCALE:g}, "
+                f"hip_range={HIP_RANGE:g}); episode {EPISODE_LENGTH_S:.1f} s; "
+                f"base floor {BASE_FLOOR:.3f} m"
+            )
 
         self.viewer.origin_type = "world"
         self.viewer.eye = (2.0, -2.0, 1.0)
         self.viewer.lookat = (0.0, 0.0, 0.1)
+
+
+@configclass
+class SquatTorqueEnvCfg(SquatEnvCfg):
+    """Pure-torque squat: 4 hip torques + 2 wheel torques, knees closed-chain followers."""
+
+    observations: SquatTorqueObservationsCfg = SquatTorqueObservationsCfg()
+    rewards: SquatTorqueRewardsCfg = SquatTorqueRewardsCfg()
+
+    def __post_init__(self):
+        # Set the action mode before super() so its config print is accurate and so
+        # the scale/limit values below are not overwritten.
+        joints = self.actions.joints
+        joints.torque_control = True
+        joints.hip_torque_scale = HIP_TORQUE_SCALE
+        joints.wheel_torque_scale = WHEEL_TORQUE_SCALE
+        joints.hip_effort_limit = TORQUE_HIP_EFFORT_LIMIT
+        joints.wheel_effort_limit = TORQUE_WHEEL_EFFORT_LIMIT
+        joints.hip_assist_kp = HIP_ASSIST_KP
+        joints.hip_assist_kd = HIP_ASSIST_KD
+        joints.hip_assist_decay_steps = HIP_ASSIST_DECAY_STEPS
+        if TEACHER_CKPT:
+            # The teacher servo already contains the -kd*v damping; adding the
+            # damping/pitch assists on top would double-count and fight it.
+            joints.wheel_assist_kd = 0.0
+            joints.wheel_pitch_assist_kp = 0.0
+            joints.wheel_pitch_assist_kd = 0.0
+        else:
+            joints.wheel_assist_kd = WHEEL_ASSIST_KD
+            joints.wheel_pitch_assist_kp = WHEEL_PITCH_ASSIST_KP
+            joints.wheel_pitch_assist_kd = WHEEL_PITCH_ASSIST_KD
+        joints.teacher_checkpoint = TEACHER_CKPT
+        joints.teacher_base_height = SQUAT_BASE_HEIGHT
+        super().__post_init__()
+
+        # Hips/wheels lose their implicit PD; the knees keep stiffness=400/damping=10.
+        self.scene.robot = INFANTRY_RL_TORQUE_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+        # A torque hip cannot catch a large initial pitch, so start closer to level.
+        self.events.reset_root.params["pitch_range_deg"] = (
+            -TORQUE_RESET_PITCH_DEG, TORQUE_RESET_PITCH_DEG
+        )
+        self.events.reset_root.params["roll_range_deg"] = (
+            -TORQUE_RESET_ROLL_DEG, TORQUE_RESET_ROLL_DEG
+        )
+        self.events.reset_root.params["ang_vel_range"] = (-0.05, 0.05)
+        print(
+            f"[cfg] squat_torque       : hips ±{TORQUE_HIP_EFFORT_LIMIT:g} Nm, "
+            f"wheels ±{TORQUE_WHEEL_EFFORT_LIMIT:g} Nm, "
+            f"knees position-controlled (stiffness 400/damping 10); "
+            f"training assist hip kp={HIP_ASSIST_KP:g} kd={HIP_ASSIST_KD:g}, "
+            f"wheel kd={WHEEL_ASSIST_KD:g}, pitch kp={WHEEL_PITCH_ASSIST_KP:g} "
+            f"kd={WHEEL_PITCH_ASSIST_KD:g}, teacher={TEACHER_CKPT or 'off'}, "
+            f"decay={HIP_ASSIST_DECAY_STEPS} steps"
+        )
 
 
 @configclass
@@ -459,17 +623,51 @@ class SquatEnvCfg_PLAY(SquatEnvCfg):
         self.observations.policy.enable_corruption = False
 
 
+@configclass
+class SquatTorqueEnvCfg_PLAY(SquatTorqueEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        # Deployment is pure torque: never re-enable the training assist.  The
+        # debug-only switch keeps it for a zero-action stability test.
+        _keep_assist = os.environ.get("INFANTRY_RL_SQUAT_PLAY_ASSIST", "0").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        if not _keep_assist:
+            self.actions.joints.hip_assist_kp = 0.0
+            self.actions.joints.hip_assist_kd = 0.0
+            self.actions.joints.hip_assist_decay_steps = 0
+            self.actions.joints.wheel_assist_kd = 0.0
+            self.actions.joints.wheel_pitch_assist_kp = 0.0
+            self.actions.joints.wheel_pitch_assist_kd = 0.0
+            self.actions.joints.teacher_checkpoint = ""
+        self.scene.num_envs = 16
+        self.scene.env_spacing = 2.5
+        self.episode_length_s = 1.0e6
+        self.observations.policy.enable_corruption = False
+
+
 class FiveBarSquatEnv(FiveBarEnv):
     """Five-bar wheel-leg balancing in a fixed, deepest-possible squat."""
 
     cfg: SquatEnvCfg
 
 
+class FiveBarSquatTorqueEnv(FiveBarSquatEnv):
+    """Five-bar wheel-leg balancing with pure hip/wheel torque and closed-chain knees."""
+
+    cfg: SquatTorqueEnvCfg
+
+
 __all__ = [
     "BASE_FLOOR",
     "EPISODE_LENGTH_S",
     "FiveBarSquatEnv",
+    "FiveBarSquatTorqueEnv",
+    "HIP_ASSIST_DECAY_STEPS",
+    "HIP_ASSIST_KD",
+    "HIP_ASSIST_KP",
     "HIP_RANGE",
+    "HIP_TORQUE_SCALE",
     "SQUAT_BACK_HIP",
     "SQUAT_BACK_HIP_OFFSET",
     "SQUAT_BASE_HEIGHT",
@@ -488,6 +686,16 @@ __all__ = [
     "SquatObservationsCfg",
     "SquatRewardsCfg",
     "SquatTerminationsCfg",
+    "SquatTorqueEnvCfg",
+    "SquatTorqueEnvCfg_PLAY",
+    "SquatTorqueObservationsCfg",
+    "SquatTorqueRewardsCfg",
+    "TORQUE_HIP_EFFORT_LIMIT",
+    "TORQUE_WHEEL_EFFORT_LIMIT",
+    "WHEEL_ASSIST_KD",
+    "WHEEL_PITCH_ASSIST_KD",
+    "WHEEL_PITCH_ASSIST_KP",
     "WHEEL_SCALE",
+    "WHEEL_TORQUE_SCALE",
     "reset_squat_pose",
 ]

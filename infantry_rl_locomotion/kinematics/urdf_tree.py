@@ -1,6 +1,6 @@
 """URDF parsing + exact forward kinematics (the ground truth for the leg model).
 
-``infantry-rl-sim.urdf`` describes each leg as a TREE plus a non-standard
+``chassis-rl.urdf`` describes each leg as a TREE plus a non-standard
 ``<loop_joint>`` that closes it into a parallel five-bar linkage.  URDF cannot express
 a closed chain and neither can a PhysX articulation, so the only thing the URDF gives us
 directly is a tree -- this module parses that tree and evaluates the exact

@@ -1,15 +1,13 @@
-"""Shared, measured data bridge for the infantry-rl five-bar robot.
+"""Shared, measured data bridge for the chassis-rl five-bar robot.
 
 Nothing in this module is hand-derived:
 
 * the planar leg model, its rotation signs, the loop solver and the batched torch
-  solver come from :mod:`isaac_ws_infantry.kinematics.planar_leg`, which is
-  verified against an exact double-precision URDF forward kinematics;
-* the numeric model constants (``A, B, P, Q, S, T`` and the signs) come from the
-  measured dump ``isaac_ws/config/planar_leg.json``;
-* the nominal standing pose comes from ``isaac_ws/config/nominal_pose.json``;
-* the loop-anchor offsets used to *measure* the closure error from simulated body
-  poses come from the URDF itself (the same source ``planar_leg`` was fitted to).
+  solver come from :mod:`kinematics.planar_leg`, fitted to the exact URDF FK;
+* the numeric model constants and the nominal pose come from
+  ``robot_data/chassis-rl/{planar_leg,nominal_pose}.json``, produced by
+  ``tools/measure_chassis_asset.py``;
+* the loop-anchor offsets come from the URDF itself.
 
 The kinematics package is imported read-only: this file never writes to it.
 """
@@ -17,7 +15,6 @@ The kinematics package is imported read-only: this file never writes to it.
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -27,49 +24,16 @@ import torch
 PROJECT_DIR = Path(__file__).resolve().parent
 
 # --------------------------------------------------------------------------- #
-# Which asset to train with
+# Robot asset (chassis-rl only)
 # --------------------------------------------------------------------------- #
-# ``INFANTRY_RL_ASSET`` selects the robot:
-#   full (default) -- the original infantry-rl CAD asset (robot_data/, assets/infantry-rl)
-#   proxy          -- the old primitive proxy (falls back to full when missing)
-#   chassis        -- the new ``chassis-rl`` URDF (chassis-rl/, robot_data/chassis-rl)
-#
-# Historical note from the original workspace, kept for context: with the
-# original loader the FULL CAD asset (~96 MB; ``base_link.STL`` alone is 57 MB)
-# appeared to build only ONE environment, and the PROXY asset (primitives sized
-# from the mesh bounding boxes) built 256 envs but fell over (489 mm closure
-# error, 448 terminations in 200 steps).
-#
-# That one-environment limit does NOT reproduce with the rebuilt asset of this
-# project: 64 environments train normally (smoke test), and 1024 is the default
-# for an 8 GB GPU.  The PROXY USD is not shipped here, so INFANTRY_RL_ASSET=proxy
-# silently falls back to the full asset.
-# --------------------------------------------------------------------------- #
-_ASSET_CHOICE = os.environ.get("INFANTRY_RL_ASSET", "full").strip().lower()
-_IS_CHASSIS = _ASSET_CHOICE in ("chassis", "chassis-rl", "chassisrl", "new")
-
-if _IS_CHASSIS:
-    ASSETS_DIR = PROJECT_DIR / "chassis-rl"
-    CONFIG_DIR = PROJECT_DIR / "robot_data" / "chassis-rl"
-    URDF_PATH = ASSETS_DIR / "urdf" / "chassis-rl.urdf"
-    #: Full-fidelity CAD asset converted from ``chassis-rl.urdf``.
-    USD_PATH_FULL = ASSETS_DIR / "urdf" / "chassis-rl" / "chassis-rl.usd"
-    USD_PATH_PROXY = USD_PATH_FULL
-    _WHEEL_JOINTS: tuple[str, str] = ("wheel_left", "wheel_right")
-else:
-    ASSETS_DIR = PROJECT_DIR / "assets" / "infantry-rl"
-    CONFIG_DIR = PROJECT_DIR / "robot_data"
-    URDF_PATH = ASSETS_DIR / "urdf" / "infantry-rl-sim.urdf"
-    #: Full-fidelity CAD asset (about 96 MB; ``base_link.STL`` alone is 57 MB).
-    USD_PATH_FULL = ASSETS_DIR / "infantry_rl.usd"
-    #: Primitive proxy asset: same 11 links, same 10 joints, same axes and limits.
-    USD_PATH_PROXY = ASSETS_DIR / "infantry_rl_proxy.usd"
-    _WHEEL_JOINTS = ("left_wheel", "right_wheel")
-
-if _ASSET_CHOICE == "proxy" and USD_PATH_PROXY.is_file():
-    USD_PATH = USD_PATH_PROXY
-else:
-    USD_PATH = USD_PATH_FULL
+ASSETS_DIR = PROJECT_DIR / "chassis-rl"
+CONFIG_DIR = PROJECT_DIR / "robot_data" / "chassis-rl"
+URDF_PATH = ASSETS_DIR / "urdf" / "chassis-rl.urdf"
+#: Full-fidelity CAD asset converted from ``chassis-rl.urdf``.
+USD_PATH = ASSETS_DIR / "urdf" / "chassis-rl" / "chassis-rl.usd"
+#: ``chassis-rl`` names the wheel JOINTS ``wheel_left`` / ``wheel_right``; the
+#: links are still ``left_wheel`` / ``right_wheel``.
+_WHEEL_JOINTS: tuple[str, str] = ("wheel_left", "wheel_right")
 
 from kinematics.planar_leg import LegPlanar, make_torch_loop_solver
 
@@ -160,46 +124,26 @@ def nominal_base_height() -> float:
 
 @lru_cache(maxsize=1)
 def squat_pose() -> dict:
-    """Deepest feasible locked-hip pose for the selected asset.
+    """Deepest feasible locked-hip pose for chassis-rl.
 
-    Produced by ``tools/measure_chassis_asset.py`` for ``chassis-rl``.  The
-    original infantry-rl asset has no file, so its previously validated values
-    are returned unchanged.  Keys used by ``env_squat``:
+    Produced by ``tools/measure_chassis_asset.py`` and required at runtime.  Keys
+    used by ``env_squat``:
 
     ``hips`` -- ``{"left": {front_hip, back_hip}, "right": {...}}`` absolute angles (rad)
     ``right_hip_sign`` -- the right-side joint values are ``sign * left`` for the same
-                          physical pose (+1 for infantry-rl, -1 for chassis-rl)
+                          physical pose (-1 for chassis-rl's mirrored right leg)
     ``leg_length``     -- hip-midpoint -> wheel-axle distance at that pose (m)
     ``base_height``    -- root height with the wheels on the ground (m)
     ``base_floor``     -- ``base_too_low`` termination height (m)
     ``pitch_limit`` / ``roll_limit`` -- attitude terminations (rad)
     """
     path = CONFIG_DIR / "squat_pose.json"
-    if path.is_file():
-        data = json.loads(path.read_text(encoding="utf-8"))
-    else:
-        # Previously validated infantry-rl values.  Both sides use the same joint
-        # values there, so the mirror sign is +1.
-        data = {
-            "hips": {
-                "left": {"front_hip": -0.163027595, "back_hip": 0.164078975},
-                "right": {"front_hip": -0.163027595, "back_hip": 0.164078975},
-            },
-            "right_hip_sign": 1.0,
-            "leg_length": 0.13636843,
-            "base_height": 0.07637,
-            "base_floor": 0.04,
-            "pitch_limit": 0.24,
-            "roll_limit": 0.30,
-        }
-    if "hips" not in data:
-        # flat legacy layout: same joint values on both sides
-        front, back = float(data["front_hip"]), float(data["back_hip"])
-        data["hips"] = {
-            "left": {"front_hip": front, "back_hip": back},
-            "right": {"front_hip": front, "back_hip": back},
-        }
-    data.setdefault("right_hip_sign", 1.0)
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"{path} is missing; run tools/measure_chassis_asset.py first"
+        )
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data.setdefault("right_hip_sign", -1.0)
     data.setdefault("leg_length", nominal_leg_length())
     data.setdefault("base_height", WHEEL_RADIUS + float(data["leg_length"]) - hip_axis_height())
     data.setdefault("base_floor", 0.04)

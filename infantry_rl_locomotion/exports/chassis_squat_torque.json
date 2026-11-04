@@ -1,0 +1,46 @@
+{
+  "checkpoint": "logs\\rsl_rl\\infantry_rl_squat_torque\\2026-11-04_17-56-09_chassis_squat_torque_s3_pure\\model_1798.pt",
+  "iteration": 1798,
+  "onnx": "exports\\chassis_squat_torque.onnx",
+  "obs_dim": 42,
+  "action_dim": 6,
+  "hidden_dims": [
+    128,
+    128,
+    64
+  ],
+  "activation": "elu",
+  "normalizer_folded": true,
+  "normalizer_eps": 0.01,
+  "opset": 17,
+  "input_names": [
+    "obs"
+  ],
+  "output_names": [
+    "action"
+  ],
+  "output_is": "deterministic policy mean (raw action, before clip/scale)",
+  "deploy_kind": "squat_torque",
+  "clip_actions": 4.0,
+  "squat_torque_postprocess": {
+    "action_scale_nm": [
+      10.0,
+      10.0,
+      10.0,
+      10.0,
+      1.0,
+      1.0
+    ],
+    "torque_nm": "clamp(clip(action, -4, 4) * [10,10,10,10,1,1], [-40,-40,-40,-40,-3.69,-3.69], [40,40,40,40,3.69,3.69])",
+    "hips": "pure torque (Nm)",
+    "wheels": "pure torque (Nm)",
+    "knees": "position-controlled five-bar closure at 50 Hz, not in ONNX",
+    "control_rate_hz": 50.0,
+    "obs_scales": {
+      "base_ang_vel": 0.25,
+      "hip_vel": 0.1,
+      "leg_rates": 0.5,
+      "wheel_vel": 0.1
+    }
+  }
+}

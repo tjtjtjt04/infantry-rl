@@ -20,10 +20,11 @@
     "action"
   ],
   "output_is": "deterministic policy mean (raw action, before clip/scale)",
+  "deploy_kind": "squat",
+  "clip_actions": 6.0,
   "squat_postprocess": {
-    "clip_actions": 12.0,
     "wheel_scale": 5.0,
-    "wheel_target_rad_s": "5.0 * clip(action, -12, 12)",
+    "wheel_target_rad_s": "5.0 * clip(action, -6, 6)",
     "hips": "constant locked pose",
     "knees": "five-bar closure solved at 50 Hz, not in ONNX",
     "control_rate_hz": 50.0,

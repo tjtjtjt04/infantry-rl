@@ -1,4 +1,4 @@
-"""Observation terms for the infantry-rl balance task.
+"""Observation terms for the chassis-rl squat tasks.
 
 Everything is expressed in the action-vector order defined in
 :mod:`isaac_ws_infantry.robot_model`, so the policy sees the same layout it commands.
@@ -101,6 +101,27 @@ def hip_pos_rel_nominal(env, action_name: str = "joints") -> torch.Tensor:
     return term._robot.data.joint_pos[:, term.hip_ids] - term.nominal_hips
 
 
+def hip_pos_rel_locked(env, action_name: str = "joints") -> torch.Tensor:
+    """Measured hip angles minus the locked/reference pose, ``(N, 4)``.
+
+    In the torque squat task the hips are not position-controlled, so this is the
+    actual posture error the policy must null out (``hip_pos_rel_nominal`` would
+    still contain the constant squat bias).
+    """
+    term = _action_term(env, action_name)
+    return term._robot.data.joint_pos[:, term.hip_ids] - term.locked_hips
+
+
+def hip_vel(env, action_name: str = "joints") -> torch.Tensor:
+    """Hip joint velocities, ``(N, 4)`` in :data:`HIP_ORDER` (rad/s).
+
+    Needed by torque control: without the velocity the policy can only use position
+    feedback and cannot damp the hip axes.
+    """
+    term = _action_term(env, action_name)
+    return term._robot.data.joint_vel[:, term.hip_ids]
+
+
 def knee_pos_rel_solved(env, action_name: str = "joints") -> torch.Tensor:
     """Measured knee angles minus the *solved* knee targets, ``(N, 4)``.
 
@@ -172,21 +193,6 @@ def base_height_rel(
     return (height - float(target_height)).unsqueeze(-1)
 
 
-def velocity_commands(env, command_name: str = "base_velocity") -> torch.Tensor:
-    """The active velocity command as ``(vx, wz)``, ``(N, 2)``.
-
-    The command tensor itself is ``(N, 3)`` = ``(vx, vy, wz)``, but this robot is a
-    two-wheel differential drive: it cannot translate sideways, so ``vy`` is always
-    forced to 0 and is not fed to the policy (a constant dim is wasted input).
-
-    ``wz`` here is *already* the output of the heading controller: the command manager
-    runs ``wz = stiffness * wrap(heading_target - heading)`` every control step, so
-    "hold the current heading" and "turn to a new heading" are the same mechanism.
-    """
-    cmd = env.command_manager.get_command(command_name)
-    return cmd[:, [0, 2]]
-
-
 __all__ = [
     "HIP_ORDER",
     "KNEE_ORDER",
@@ -196,14 +202,15 @@ __all__ = [
     "closure_residual",
     "heading_error",
     "heading_sin_cos",
+    "hip_pos_rel_locked",
     "hip_pos_rel_nominal",
+    "hip_vel",
     "knee_pos_rel_solved",
     "last_action_raw",
     "leg_rates",
     "measured_leg_state",
     "position_error",
     "solved_leg_state",
-    "velocity_commands",
     "wheel_vel",
     "yaw_angle",
 ]
