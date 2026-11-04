@@ -1,0 +1,100 @@
+{
+  "stage": "D:\\IsaacLab-main\\infantry_rl_locomotion\\chassis-rl\\urdf\\chassis-rl\\chassis-rl.usd",
+  "default_prim": "/chassis_rl",
+  "revolute_joints": {
+    "left_back_hip": {
+      "lower_deg": -0.005729577504098415,
+      "upper_deg": 85.35002899169922,
+      "exclude_from_articulation": false
+    },
+    "left_back_knee": {
+      "lower_deg": -114.56290435791016,
+      "upper_deg": 0.005729577504098415,
+      "exclude_from_articulation": false
+    },
+    "left_front_hip": {
+      "lower_deg": -85.30997467041016,
+      "upper_deg": 0.005729577504098415,
+      "exclude_from_articulation": false
+    },
+    "left_front_knee": {
+      "lower_deg": -0.005729577504098415,
+      "upper_deg": 114.53694915771484,
+      "exclude_from_articulation": false
+    },
+    "wheel_left": {
+      "lower_deg": -Infinity,
+      "upper_deg": Infinity,
+      "exclude_from_articulation": false
+    },
+    "right_back_hip": {
+      "lower_deg": -85.35002899169922,
+      "upper_deg": 0.005729577504098415,
+      "exclude_from_articulation": false
+    },
+    "right_back_knee": {
+      "lower_deg": -0.005729577504098415,
+      "upper_deg": 114.56290435791016,
+      "exclude_from_articulation": false
+    },
+    "right_front_hip": {
+      "lower_deg": -0.005729577504098415,
+      "upper_deg": 85.30997467041016,
+      "exclude_from_articulation": false
+    },
+    "right_front_knee": {
+      "lower_deg": -114.53694915771484,
+      "upper_deg": 0.005729577504098415,
+      "exclude_from_articulation": false
+    },
+    "wheel_right": {
+      "lower_deg": -Infinity,
+      "upper_deg": Infinity,
+      "exclude_from_articulation": false
+    }
+  },
+  "limit_errors": [],
+  "loop_constraints": {
+    "left_calf_axle": {
+      "type": "PhysicsSphericalJoint",
+      "active": true,
+      "exclude_from_articulation": true,
+      "joint_enabled": true
+    },
+    "right_calf_axle": {
+      "type": "PhysicsSphericalJoint",
+      "active": true,
+      "exclude_from_articulation": true,
+      "joint_enabled": true
+    }
+  },
+  "articulation_roots": [
+    "/chassis_rl/base_link"
+  ],
+  "config": {
+    "asset_path": "D:\\IsaacLab-main\\infantry_rl_locomotion\\chassis-rl\\urdf\\chassis-rl.urdf",
+    "usd_dir": "D:\\IsaacLab-main\\infantry_rl_locomotion\\chassis-rl\\urdf\\chassis-rl",
+    "usd_file_name": "chassis-rl.usd",
+    "force_usd_conversion": true,
+    "make_instanceable": true,
+    "fix_base": false,
+    "root_link_name": null,
+    "link_density": 0.0,
+    "merge_fixed_joints": true,
+    "convert_mimic_joints_to_normal_joints": false,
+    "joint_drive": {
+      "drive_type": "force",
+      "target_type": "position",
+      "gains": {
+        "stiffness": 0.0,
+        "damping": 0.0
+      }
+    },
+    "collider_type": "convex_hull",
+    "self_collision": false,
+    "replace_cylinders_with_capsules": false,
+    "collision_from_visuals": false
+  },
+  "failures": [],
+  "passed": true
+}

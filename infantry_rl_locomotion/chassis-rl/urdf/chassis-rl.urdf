@@ -1,0 +1,651 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
+     Commit Version: 1.6.0-4-g7f85cfe  Build Version: 1.6.7995.38578
+     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<!--
+  Joint <limit> values are referenced to the joint zero (q = 0 = CAD assembly pose, the
+  retracted end of the mechanical stroke).  They are derived from the two stroke-end
+  ABSOLUTE link angles recorded in 底盘数据.txt: for a hip, the travel is the change of the
+  ham angle; for a knee it is the change of the calf angle RELATIVE to the ham
+  (dq = d(calf) - d(ham), ~114.5 deg), because the ham itself rotates too.  The knee values
+  are taken from the closed-loop-consistent pose at the stroke end.  The full mechanical
+  stroke is preserved (leg length 144.8 mm -> 389.7 mm) and q = 0 lies inside every range;
+  read literally as absolute angles, the old values put q = 0 outside six joints and PhysX
+  clamped the mechanism on the first step.
+-->
+<robot
+  name="chassis-rl">
+  <link
+    name="base_link">
+    <inertial>
+      <origin
+        xyz="-0.0067139 -0.00018909 0.0055232"
+        rpy="0 0 0" />
+      <mass
+        value="11.339" />
+      <inertia
+        ixx="0.013783"
+        ixy="-3.6529E-06"
+        ixz="-1.0162E-05"
+        iyy="0.028471"
+        iyz="1.9216E-06"
+        izz="0.016412" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis-rl/meshes/base_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis-rl/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link
+    name="left_front_ham">
+    <inertial>
+      <origin
+        xyz="0.096345 0.0047072 0.017243"
+        rpy="0 0 0" />
+      <mass
+        value="0.34034" />
+      <inertia
+        ixx="0.00011924"
+        ixy="1.7575E-06"
+        ixz="-0.00011569"
+        iyy="0.00081315"
+        iyz="3.1438E-07"
+        izz="0.00074173" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis-rl/meshes/left_front_ham.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.75294 0.75294 0.75294 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis-rl/meshes/left_front_ham.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="left_front_hip"
+    type="revolute">
+    <origin
+      xyz="0.071525 0.16831 0.030406"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="left_front_ham" />
+    <axis
+      xyz="0 -1 0" />
+    <limit
+      lower="-1.488940"
+      upper="0.000100"
+      effort="40"
+      velocity="16.755" />
+  </joint>
+  <link
+    name="left_front_calf">
+    <inertial>
+      <origin
+        xyz="-0.15446 -0.0015817 -0.1132"
+        rpy="0 0 0" />
+      <mass
+        value="0.884" />
+      <inertia
+        ixx="0.0017587"
+        ixy="2.0038E-06"
+        ixz="-0.0019248"
+        iyy="0.0046642"
+        iyz="1.9296E-06"
+        izz="0.0029982" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis-rl/meshes/left_front_calf.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis-rl/meshes/left_front_calf.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="left_front_knee"
+    type="revolute">
+    <origin
+      xyz="0.14273 0.021 0.025547"
+      rpy="0 0 0" />
+    <parent
+      link="left_front_ham" />
+    <child
+      link="left_front_calf" />
+    <axis
+      xyz="0 -1 0" />
+    <limit
+      lower="-0.000100"
+      upper="1.999047"
+      effort="40"
+      velocity="16.755" />
+  </joint>
+  <link
+    name="left_wheel">
+    <inertial>
+      <origin
+        xyz="1.2603E-14 -0.0039251 9.9781E-15"
+        rpy="0 0 0" />
+      <mass
+        value="0.337" />
+      <inertia
+        ixx="0.00048617"
+        ixy="4.6512E-18"
+        ixz="-2.874E-07"
+        iyy="0.00095993"
+        iyz="8.0586E-18"
+        izz="0.00048652" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis-rl/meshes/left_wheel.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis-rl/meshes/left_wheel.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="wheel_left"
+    type="continuous">
+    <origin
+      xyz="-0.21773 0.034945 -0.15966"
+      rpy="0 0 0" />
+    <parent
+      link="left_front_calf" />
+    <child
+      link="left_wheel" />
+    <axis
+      xyz="0 -1 0" />
+    <limit
+      effort="4.92"
+      velocity="61.4705" />
+  </joint>
+  <link
+    name="left_back_ham">
+    <inertial>
+      <origin
+        xyz="-0.10143 0.0054426 0.018159"
+        rpy="0 0 0" />
+      <mass
+        value="0.26495" />
+      <inertia
+        ixx="8.4309E-05"
+        ixy="-2.2099E-10"
+        ixz="8.0509E-05"
+        iyy="0.00057487"
+        iyz="8.2261E-10"
+        izz="0.0005218" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis-rl/meshes/left_back_ham.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.75294 0.75294 0.75294 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis-rl/meshes/left_back_ham.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="left_back_hip"
+    type="revolute">
+    <origin
+      xyz="-0.078475 0.17081 0.030406"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="left_back_ham" />
+    <axis
+      xyz="0 -1 0" />
+    <limit
+      lower="-0.000100"
+      upper="1.489639"
+      effort="40"
+      velocity="16.755" />
+  </joint>
+  <link
+    name="left_back_calf">
+    <inertial>
+      <origin
+        xyz="0.11689 -0.0085987 -0.086919"
+        rpy="0 0 0" />
+      <mass
+        value="0.35489" />
+      <inertia
+        ixx="0.00051979"
+        ixy="6.742E-07"
+        ixz="0.00053625"
+        iyy="0.0013558"
+        iyz="-5.4728E-07"
+        izz="0.0008489" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis-rl/meshes/left_back_calf.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis-rl/meshes/left_back_calf.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="left_back_knee"
+    type="revolute">
+    <origin
+      xyz="-0.14273 0.0185 0.025549"
+      rpy="0 0 0" />
+    <parent
+      link="left_back_ham" />
+    <child
+      link="left_back_calf" />
+    <axis
+      xyz="0 -1 0" />
+    <limit
+      lower="-1.999500"
+      upper="0.000100"
+      effort="40"
+      velocity="16.755" />
+  </joint>
+  <link
+    name="right_back_ham">
+    <inertial>
+      <origin
+        xyz="0.10123 0.005343 0.018123"
+        rpy="0 0 0" />
+      <mass
+        value="0.26364" />
+      <inertia
+        ixx="8.4073E-05"
+        ixy="2.1027E-10"
+        ixz="-8.0509E-05"
+        iyy="0.00057442"
+        iyz="7.8315E-10"
+        izz="0.00052156" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis-rl/meshes/right_back_ham.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.75294 0.75294 0.75294 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis-rl/meshes/right_back_ham.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_back_hip"
+    type="revolute">
+    <origin
+      xyz="-0.078475 -0.17019 0.030406"
+      rpy="0 0 -3.1416" />
+    <parent
+      link="base_link" />
+    <child
+      link="right_back_ham" />
+    <axis
+      xyz="0 -1 0" />
+    <limit
+      lower="-1.489639"
+      upper="0.000100"
+      effort="40"
+      velocity="16.755" />
+  </joint>
+  <link
+    name="right_back_calf">
+    <inertial>
+      <origin
+        xyz="-0.11906 -0.0091591 -0.088474"
+        rpy="0 0 0" />
+      <mass
+        value="0.36608" />
+      <inertia
+        ixx="0.00052488"
+        ixy="-6.9306E-07"
+        ixz="-0.00053875"
+        iyy="0.0013671"
+        iyz="-5.6111E-07"
+        izz="0.00085556" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis-rl/meshes/right_back_calf.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis-rl/meshes/right_back_calf.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_back_knee"
+    type="revolute">
+    <origin
+      xyz="0.14273 0.0185 0.025549"
+      rpy="0 0 0" />
+    <parent
+      link="right_back_ham" />
+    <child
+      link="right_back_calf" />
+    <axis
+      xyz="0 -1 0" />
+    <limit
+      lower="-0.000100"
+      upper="1.999500"
+      effort="40"
+      velocity="16.755" />
+  </joint>
+  <link
+    name="right_front_ham">
+    <inertial>
+      <origin
+        xyz="-0.096166 0.0046172 0.017211"
+        rpy="0 0 0" />
+      <mass
+        value="0.33903" />
+      <inertia
+        ixx="0.00011901"
+        ixy="-1.7575E-06"
+        ixz="0.00011569"
+        iyy="0.0008127"
+        iyz="3.144E-07"
+        izz="0.0007415" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis-rl/meshes/right_front_ham.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.75294 0.75294 0.75294 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis-rl/meshes/right_front_ham.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_front_hip"
+    type="revolute">
+    <origin
+      xyz="0.071525 -0.16769 0.030406"
+      rpy="0 0 -3.1416" />
+    <parent
+      link="base_link" />
+    <child
+      link="right_front_ham" />
+    <axis
+      xyz="0 -1 0" />
+    <limit
+      lower="-0.000100"
+      upper="1.488940"
+      effort="40"
+      velocity="16.755" />
+  </joint>
+  <link
+    name="right_front_calf">
+    <inertial>
+      <origin
+        xyz="0.15431 -0.0015063 -0.11309"
+        rpy="0 0 0" />
+      <mass
+        value="0.882" />
+      <inertia
+        ixx="0.0017587"
+        ixy="-2.0041E-06"
+        ixz="0.0019251"
+        iyy="0.0046642"
+        iyz="1.9298E-06"
+        izz="0.0029984" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis-rl/meshes/right_front_calf.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis-rl/meshes/right_front_calf.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_front_knee"
+    type="revolute">
+    <origin
+      xyz="-0.14273 0.021 0.025547"
+      rpy="0 0 0" />
+    <parent
+      link="right_front_ham" />
+    <child
+      link="right_front_calf" />
+    <axis
+      xyz="0 -1 0" />
+    <limit
+      lower="-1.999047"
+      upper="0.000100"
+      effort="40"
+      velocity="16.755" />
+  </joint>
+  <link
+    name="right_wheel">
+    <inertial>
+      <origin
+        xyz="1.016E-14 -0.0038064 1.2421E-15"
+        rpy="0 0 0" />
+      <mass
+        value="0.337" />
+      <inertia
+        ixx="0.00049754"
+        ixy="6.2850E-18"
+        ixz="2.7173E-07"
+        iyy="0.00098169"
+        iyz="1.5037E-18"
+        izz="0.00049786" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis-rl/meshes/right_wheel.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis-rl/meshes/right_wheel.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="wheel_right"
+    type="continuous">
+    <origin
+      xyz="0.21773 0.034945 -0.15966"
+      rpy="0 0 0" />
+    <parent
+      link="right_front_calf" />
+    <child
+      link="right_wheel" />
+    <axis
+      xyz="0 -1 0" />
+    <limit
+      effort="4.92"
+      velocity="61.4705" />
+  </joint>
+  <!--
+    Closed chain (five-bar wheel-leg): the wheel axle also sits in the back calf's axle hole.
+    Represented with the Isaac Sim <loop_joint> URDF extension (isaacsim.asset.importer.urdf
+    >= 2.1.0), exactly as in assets/infantry-rl/urdf/infantry-rl-sim.urdf.  The importer turns
+    each one into a PhysicsSphericalJoint OUTSIDE the articulation, so PhysX enforces the loop
+    as a real constraint instead of rejecting a closed articulation.  Each link contributes the
+    axle-centre point in its own link frame, computed from this URDF's tree at q = 0 (the CAD
+    assembly pose).  No other physical property of this URDF was modified.
+  -->
+  <loop_joint name="left_calf_axle" type="spherical">
+    <link1 link="left_wheel" rpy="0 0 0" xyz="0.00000000 0.00000000 0.00000000" />
+    <link2 link="left_back_calf" rpy="0 0 0" xyz="0.21773000 0.03494500 -0.15966200" />
+  </loop_joint>
+  <loop_joint name="right_calf_axle" type="spherical">
+    <link1 link="right_wheel" rpy="0 0 0" xyz="0.00000000 0.00000000 0.00000000" />
+    <link2 link="right_back_calf" rpy="0 0 0" xyz="-0.21772998 0.03494390 -0.15966200" />
+  </loop_joint>
+</robot>

@@ -1,0 +1,35 @@
+{
+  "mapping": {
+    "left_x": 0,
+    "left_y": 1,
+    "button_a": 0,
+    "button_b": 1,
+    "button_rb": 5,
+    "button_estop": null,
+    "invert_left_y": true,
+    "invert_left_x": true
+  },
+  "command": {
+    "forward_max": 2.5,
+    "reverse_max": 1.0,
+    "yaw_max": 2.0,
+    "spin_max": 8.0,
+    "spin_stance_crouch": -0.65,
+    "spin_stance_extend": 0.35,
+    "lateral_accel_limit": 4.0,
+    "deadzone": 0.07,
+    "rearm_deadzone": 0.12,
+    "expo": 0.25,
+    "vx_tau": 0.1,
+    "wz_tau": 0.12,
+    "vx_accel": 2.0,
+    "vx_decel": 3.0,
+    "vx_brake_decel": 6.0,
+    "reverse_accel": 2.0,
+    "wz_accel": 10.0,
+    "spin_accel": 10.0,
+    "watchdog_timeout": 0.15,
+    "reconnect_neutral_time": 0.25,
+    "spin_dir_default": 1
+  }
+}
