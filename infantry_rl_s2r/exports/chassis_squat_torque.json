@@ -1,0 +1,106 @@
+{
+  "checkpoint": "logs\\rsl_rl\\infantry_rl_squat_torque\\2026-11-06_18-14-27_chassis_squat_joint_100hz_dr3\\model_2596.pt",
+  "iteration": 2596,
+  "onnx": "exports\\chassis_squat_torque.onnx",
+  "obs_dim": 125,
+  "action_dim": 6,
+  "history_length": 5,
+  "frame_dim": 25,
+  "current_dim": 25,
+  "latent_dim": 3,
+  "actor_input": 28,
+  "encoder_hidden_dims": [
+    128,
+    64
+  ],
+  "hidden_dims": [
+    128,
+    128,
+    64
+  ],
+  "activation": "elu",
+  "normalizer_folded": false,
+  "normalizer_eps": 0.01,
+  "opset": 17,
+  "input_names": [
+    "history"
+  ],
+  "output_names": [
+    "action"
+  ],
+  "output_is": "deterministic policy mean (raw action, before clip/scale)",
+  "history_layout": "oldest to newest: [o_{t-4}, o_{t-3}, o_{t-2}, o_{t-1}, o_t], each frame 25 dims",
+  "obs_layout": [
+    {
+      "name": "base_ang_vel",
+      "slice": [
+        0,
+        3
+      ],
+      "scale": 0.25
+    },
+    {
+      "name": "projected_gravity",
+      "slice": [
+        3,
+        6
+      ],
+      "scale": 1.0
+    },
+    {
+      "name": "command",
+      "slice": [
+        6,
+        9
+      ],
+      "scale": 1.0
+    },
+    {
+      "name": "hip_pos_rel_locked",
+      "slice": [
+        9,
+        13
+      ],
+      "scale": 1.0
+    },
+    {
+      "name": "joint_vel_hips_wheels",
+      "slice": [
+        13,
+        19
+      ],
+      "scale": 0.1
+    },
+    {
+      "name": "last_action",
+      "slice": [
+        19,
+        25
+      ],
+      "scale": 1.0
+    }
+  ],
+  "action_layout": {
+    "0:4": "hip position target offset [rad]",
+    "4:6": "wheel velocity target [rad/s]"
+  },
+  "action_postprocess": {
+    "hip_position_target_rad": "squat_hips + clip(action[:4], -4, 4) * 0.5",
+    "wheel_velocity_target_rad_s": "clip(action[4:6], -4, 4) * 10.0",
+    "low_level_pd": {
+      "hip_kp": 40.0,
+      "hip_kd": 1.0,
+      "wheel_kd": 0.5,
+      "tau_hip": "kp*(q_ref - q) - kd*qdot  [Nm], clamp \u00b140",
+      "tau_wheel": "wheel_kd*(v_ref - v)  [Nm], clamp \u00b13.69"
+    },
+    "hips": "position target -> PD -> torque",
+    "wheels": "velocity target -> damping -> torque"
+  },
+  "knees": "position-controlled five-bar closure at 50 Hz, not in ONNX",
+  "control_rate_hz": 100.0,
+  "obs_scales": {
+    "base_ang_vel": 0.25,
+    "joint_vel_hips_wheels": 0.1
+  }
+}
