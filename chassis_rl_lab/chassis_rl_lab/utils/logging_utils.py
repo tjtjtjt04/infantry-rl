@@ -40,6 +40,8 @@ import math
 import re
 import statistics
 
+import torch
+
 __all__ = ["make_compact_logger_log"]
 
 #: TensorBoard 打印里可能夹带的 ANSI 颜色控制符（\x1b[1m ... \x1b[0m）
@@ -93,7 +95,46 @@ def make_compact_logger_log(runner, raw_env, total_iterations: int | None = None
                     except Exception:  # noqa: BLE001 - 写日志失败不影响训练
                         pass
 
-        # 3) 过滤控制台输出：只保留 "Mean value loss" 及以下的行
+        # 3) 记录"实际训练表现"（供训练后做策略/关节行为分析，导出到 data/<run>/metrics.csv 与图）：
+        #    每个关节的位置/速度/力矩 + 机体姿态/速度
+        try:
+            robot = raw_env.scene["robot"]
+            q = robot.data.joint_pos.detach()
+            qd = robot.data.joint_vel.detach()
+            tau = robot.data.applied_torque.detach()
+            writer = getattr(logger, "writer", None)
+            if writer is not None:
+                for joint_index, joint_name in enumerate(robot.joint_names):
+                    writer.add_scalar(f"Joint/{joint_name}_pos", float(q[:, joint_index].mean()), it)
+                    writer.add_scalar(f"Joint/{joint_name}_vel", float(qd[:, joint_index].mean()), it)
+                    writer.add_scalar(f"Joint/{joint_name}_tau", float(tau[:, joint_index].mean()), it)
+                gravity_b = robot.data.projected_gravity_b
+                pitch = torch.asin(torch.clamp(gravity_b[:, 0], -1.0, 1.0))
+                roll = torch.asin(torch.clamp(-gravity_b[:, 1], -1.0, 1.0))
+                writer.add_scalar("State/pitch_deg", float(torch.rad2deg(pitch).mean()), it)
+                writer.add_scalar("State/roll_deg", float(torch.rad2deg(roll).mean()), it)
+                writer.add_scalar("State/base_height", float(robot.data.root_pos_w[:, 2].mean()), it)
+                writer.add_scalar(
+                    "State/lin_vel_xy", float(robot.data.root_lin_vel_b[:, :2].norm(dim=-1).mean()), it
+                )
+                writer.add_scalar("State/ang_vel_z", float(robot.data.root_ang_vel_b[:, 2].mean()), it)
+                # 左右腿"劈叉"程度：|q_LF - q_RF| 与 |q_LB - q_RB| 的均值（rad）
+                hip_names = (
+                    "left_front_hip",
+                    "left_back_hip",
+                    "right_front_hip",
+                    "right_back_hip",
+                )
+                hip_ids = [robot.joint_names.index(name) for name in hip_names]
+                split = (
+                    torch.abs(q[:, hip_ids[0]] - q[:, hip_ids[2]])
+                    + torch.abs(q[:, hip_ids[1]] - q[:, hip_ids[3]])
+                ) / 2.0
+                writer.add_scalar("State/hip_split", float(split.mean()), it)
+        except Exception:  # noqa: BLE001 - 记录失败不影响训练
+            pass
+
+        # 4) 过滤控制台输出：只保留 "Mean value loss" 及以下的行
         if raw_output.strip():
             lines = raw_output.splitlines()
             plain = [_strip_ansi(line) for line in lines]

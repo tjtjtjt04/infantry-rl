@@ -73,9 +73,9 @@ FALLEN_PITCH_RANGE: tuple[float, float] = (0.24, 0.34)
 #: - 上限 0.270 m 对应髋伸展 ~0.60 rad（运动学最高 0.2825 m @ 0.66 rad，再大闭链换分支）。
 HEIGHT_COMMAND_RANGE: tuple[float, float] = (0.172, 0.270)
 #: 高度指令 curriculum 长度 [全局控制步]：前期从名义高度逐步放开到完整范围
-#: （0 = 不启用 curriculum，直接随机；48 步/iter ⇒ 800 iter ≈ 38400）。
-#: 范围从 0.19 扩到 0.27 后拉长 curriculum，避免续训时突然要求更高姿态。
-HEIGHT_CURRICULUM_STEPS: int = 48 * 800
+#: （0 = 不启用 curriculum，直接随机；48 步/iter ⇒ 1500 iter ≈ 72000）。
+#: 范围从 0.19 扩到 0.27 后拉长 curriculum，且配合高度误差惩罚，避免策略"站最低、忽略指令"。
+HEIGHT_CURRICULUM_STEPS: int = 48 * 1500
 #: 阶段1"收腿稳定/自然倒地"总时长（控制步）：阶段1 不需要，置 0
 STAGE1_SETTLE_STEPS: int = 0
 #: 阶段2 开局"收腿稳定"步数（0.4 s）：髋 PD 把腿保持在最短姿态后再交给策略
@@ -387,6 +387,9 @@ class RewardsCfg:
     upright = RewTerm(func=mdp.upright, weight=2.0, params={"denom": 0.02})  # 姿态竖直（窄核）
     tilt = RewTerm(func=mdp.tilt_l2, weight=-3.0)  # 倾斜度平方惩罚（全程有梯度）
     pitch_progress = RewTerm(func=mdp.pitch_progress, weight=-1.5)  # 姿态改善过程奖励
+    # 左右腿对称（抑制"劈叉"站姿）：髋角左右差的平方 + 左右轮速差
+    hip_symmetry = RewTerm(func=mdp.hip_symmetry_l2, weight=-2.0)
+    wheel_symmetry = RewTerm(func=mdp.wheel_symmetry_l2, weight=-0.02)
     # 高度跟踪（阶段1 关闭）
     base_height_track = RewTerm(func=mdp.base_height_track, weight=0.0, params={"sigma": 0.001})
     height_rate = RewTerm(func=mdp.height_rate_l2, weight=0.0)
@@ -405,8 +408,10 @@ class RewardsCfg:
 class RewardsCfgHeight(RewardsCfg):
     """**阶段2 奖励**：在阶段1基础上打开高度跟踪。"""
 
-    base_height_track = RewTerm(func=mdp.base_height_track, weight=2.0, params={"sigma": 0.001})
-    height_rate = RewTerm(func=mdp.height_rate_l2, weight=-0.5)
+    # 高度跟踪：指数核（近处精确）+ 误差平方惩罚（大误差时有梯度，防"站最低忽略指令"）
+    base_height_track = RewTerm(func=mdp.base_height_track, weight=3.0, params={"sigma": 0.0025})
+    height_error = RewTerm(func=mdp.height_error_l2, weight=-40.0)
+    height_rate = RewTerm(func=mdp.height_rate_l2, weight=-0.05)
 
 
 # --------------------------------------------------------------------------- #

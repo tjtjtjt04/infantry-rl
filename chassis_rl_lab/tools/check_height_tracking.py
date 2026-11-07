@@ -27,6 +27,8 @@ parser.add_argument("--checkpoint", type=str, default=None, help="checkpoint 路
 parser.add_argument("--num_envs", type=int, default=3, help="并行 env 数（每个 env 一个目标高度）")
 parser.add_argument("--episode_steps", type=int, default=1000, help="每个 episode 步数")
 parser.add_argument("--skip_steps", type=int, default=400, help="忽略起立阶段，只统计之后的稳态")
+parser.add_argument("--height_lo", type=float, default=None, help="目标高度下限（默认取任务 cfg）")
+parser.add_argument("--height_hi", type=float, default=None, help="目标高度上限（默认取任务 cfg）")
 args = parser.parse_args()
 args.headless = True
 app = AppLauncher(args)
@@ -76,13 +78,14 @@ hip_ids, _ = robot.find_joints(
 
 from chassis_rl_lab.tasks.stand_up.stand_up_env_cfg import HEIGHT_COMMAND_RANGE  # noqa: E402
 
-h_lo, h_hi = float(HEIGHT_COMMAND_RANGE[0]), float(HEIGHT_COMMAND_RANGE[1])
+h_lo = float(HEIGHT_COMMAND_RANGE[0]) if args.height_lo is None else float(args.height_lo)
+h_hi = float(HEIGHT_COMMAND_RANGE[1]) if args.height_hi is None else float(args.height_hi)
 targets = torch.linspace(h_lo, h_hi, int(args.num_envs), device=raw.device)
 raw.height_command[:] = targets.unsqueeze(1)
 num = int(args.num_envs)
 
 z_hist = [[] for _ in range(num)]
-hip_hist = [[] for _ in range(num)]
+hip_hist = [[] for _ in range(num)]  # 每个 env 记录 4 个髋角（LF, LB, RF, RB）
 obs = env.get_observations()
 with torch.inference_mode():
     for step in range(int(args.episode_steps)):
@@ -94,27 +97,32 @@ with torch.inference_mode():
         if step >= int(args.skip_steps):
             for i in range(num):
                 z_hist[i].append(float(robot.data.root_pos_w[i, 2]))
-                hip_hist[i].append(float(robot.data.joint_pos[i, hip_ids[0]]))
+                hip_hist[i].append([float(v) for v in robot.data.joint_pos[i, hip_ids]])
 
-print("=" * 92)
-print(f"{'目标高度 h_cmd':>14} | {'实测 base_z(均值)':>18} | {'误差':>9} | {'髋角(前左)均值':>16} | {'base_z 波动':>14}")
-print("-" * 92)
+print("=" * 118)
+print(
+    f"{'目标 h_cmd':>10} | {'实测 base_z':>10} | {'误差':>8} | {'劈叉幅度(rad)':>12} | "
+    f"{'LF':>8} | {'LB':>8} | {'RF':>8} | {'RB':>8}"
+)
+print("-" * 118)
 for i in range(num):
     if not z_hist[i]:
         print(f"  env{i}: 没有采样（步数太少）")
         continue
     cmd = float(targets[i])
     z_mean = sum(z_hist[i]) / len(z_hist[i])
-    z_min, z_max = min(z_hist[i]), max(z_hist[i])
-    hip_mean = sum(hip_hist[i]) / len(hip_hist[i])
+    n = len(hip_hist[i])
+    hips_mean = [sum(h[k] for h in hip_hist[i]) / n for k in range(4)]
+    split = (abs(hips_mean[0] - hips_mean[2]) + abs(hips_mean[1] - hips_mean[3])) / 2.0
     print(
-        f"{cmd:>14.4f} | {z_mean:>18.4f} | {z_mean - cmd:>+9.4f} | {hip_mean:>16.4f} | {z_max - z_min:>14.4f}"
+        f"{cmd:>10.4f} | {z_mean:>10.4f} | {z_mean - cmd:>+8.4f} | {split:>12.4f} | "
+        f"{hips_mean[0]:>8.3f} | {hips_mean[1]:>8.3f} | {hips_mean[2]:>8.3f} | {hips_mean[3]:>8.3f}"
     )
 z_means = [sum(h) / len(h) for h in z_hist if h]
 if len(z_means) >= 2:
-    print("-" * 92)
+    print("-" * 118)
     print(f"不同目标高度下 base_z 均值差异（max-min）= {max(z_means) - min(z_means):.4f} m")
-print("=" * 92)
+print("=" * 118)
 print("done")
 import os
 

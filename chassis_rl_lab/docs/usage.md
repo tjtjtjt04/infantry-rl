@@ -60,7 +60,7 @@ dir logs\rsl_rl\chassis_rl_stand_up\*stage1\model_*.pt
 D:\miniconda\envs\RM\python.exe scripts\train.py --headless --task Chassis-Stand-Up-Height-v0 --resume --load_run ".*stage1" --load_checkpoint model_1000.pt --num_envs 1024 --max_iterations 1000 --run_name stage2_height
 ```
 
-- 阶段2 **放开髋**（4 髋力矩 ≤±20 Nm + 2 轮力矩全部生效）；起始改为"收腿倒地"（髋收到最短 q=0，开局 0.4 s 收腿稳定）；高度指令每 episode 在 **0.172~0.270 m** 随机（带 curriculum，续训时从续训点起慢慢放开）+ 高度跟踪奖励 `exp(-(h-h_cmd)²/0.001)`；
+- 阶段2 **放开髋**（4 髋力矩 ≤±20 Nm + 2 轮力矩全部生效）；起始改为"收腿倒地"（髋收到最短 q=0，开局 0.4 s 收腿稳定）；高度指令每 episode 在 **0.172~0.270 m** 随机（带 curriculum，续训时从续训点起慢慢放开）+ 高度跟踪奖励 `exp(-(h-h_cmd)²/0.0025)×3.0` + 误差平方惩罚 `-(h-h_cmd)²×40`；
 - 观测/动作维度与阶段1相同，所以 `--resume` 直接加载阶段1网络继续训练（迭代数接着算）；
 - 训练数据同样自动落到 `data/<时间戳>_stage2_height/`。
 
@@ -209,12 +209,14 @@ D:\miniconda\envs\RM\python.exe scripts\play.py --headless --num_envs 16 --episo
 | 起始状态 | 倒地姿态（pitch 14~19°，**squat 腿型、髋被 PD 锁住**）；方向按课程切换：0–300 iter **正**、301–600 iter **负**、之后**随机** | 倒地姿态 + **髋收到最短腿长（q=0）**；开局 0.4 s「收腿稳定」后交给策略（方向同样按课程切换） |
 | 动作（6 维） | 6 维接口，但**前 4 维髋输出被屏蔽**（髋 PD 锁 squat）；实际只控 2 轮力矩（×1 Nm，夹 ±4.92） | **6 维全部生效**：4 髋力矩（×2.5 Nm，夹 ±20）+ 2 轮力矩（×1 Nm，夹 ±4.92） |
 | 观测（25 维） | ang_vel×0.25 → gravity → commands(固定名义高度) → hip_pos_rel → dof_vel×0.05 → actions | 同左（commands[2] 每 episode 随机高度×5） |
-| 高度指令 | 固定 0.1716 m | 随机 ∈ [0.172, 0.270] m（下限=收腿最短，上限≈髋伸展0.60rad；运动学极限0.2825），curriculum 800 iter |
-| 高度奖励 | 关闭（权重 0） | `exp(-(h-h_cmd)²/0.001)` 权重 2.0 |
+| 高度指令 | 固定 0.1716 m | 随机 ∈ [0.172, 0.270] m（下限=收腿最短，上限≈髋伸展0.60rad；运动学极限0.2825），curriculum 1500 iter |
+| 高度奖励 | 关闭（权重 0） | `exp(-(h-h_cmd)²/0.0025)` 权重 3.0 + `height_error_l2` 权重 -40 |
 | 终止 | 超时 + 未恢复（300 步后倾角 >0.25 rad） | 同左 |
 | 平衡辅助 | 轮上 PD：每阶段（300 iter）内 1→0 退火，前 2 阶段有辅助，**iter>600 无辅助** | 关闭（阶段1 已学会轮平衡） |
 
 ## 5. 训练数据（`data/`）
+
+**每轮记录的实际状态指标**（用于分析策略/关节表现，自动进 `data/<run>/`）：`Height/target|now|error`（目标 vs 当前高度）、`State/base_height|pitch_deg|roll_deg|lin_vel_xy|ang_vel_z`（机体姿态/速度）、`Joint/<关节名>_pos|_vel|_tau`（4 hip + 4 knee + 2 wheel 的位置/速度/力矩）。
 
 **控制台输出**：训练时每轮打印精简信息——第一行是训练轮次 `[iter 当前/总]`，之后从 `Mean value loss` 开始（去掉了 Total steps/速度/耗时等标题行），并在 `Mean action std` 后追加三行：`Height target`（目标高度）、`Height now`（当前高度）、`Height error`（误差）；完整曲线照常写入 TensorBoard 与 `data/<run>/`。
 
@@ -222,13 +224,19 @@ D:\miniconda\envs\RM\python.exe scripts\play.py --headless --num_envs 16 --episo
 
 ```
 data\<时间戳>_<run名>\
-    metrics.csv        全部指标（iteration,tag,value 长格式）
+    metrics.csv        全部指标（iteration,tag,value 长格式；含 Height/State/Joint/* 等实际状态指标）
+    height_tracking.csv 高度跟踪宽表（iteration,height_target,height_now,height_error）
     summary.json       每指标 first/last/min/max + checkpoint 列表 + 训练配置
     README.md          人读摘要（含最终 reward / episode 长度）
     env.yaml / agent.yaml
     plots\
+        00_height_tracking.png  目标高度 vs 当前高度 / 跟踪误差（Height 任务）
         01_train.png  02_episode_reward.png  03_termination.png
         04_losses.png 05_policy_lr.png       06_perf.png
+        07_base_state.png       机体高度 / pitch-roll / 线速度-角速度
+        08_joint_positions.png  每个关节位置（4 hip + 4 knee + 2 wheel）
+        09_joint_velocities.png 每个关节速度
+        10_joint_torques.png    每个关节力矩
 ```
 
 补导出已有 run：`... tools\export_training_data.py --log_dir <run> [--data_root D:\rl_data]`
@@ -244,7 +252,8 @@ data\<时间戳>_<run名>\
 | 平衡辅助开关/退火 | `balance_assist / assist_cycle_steps / assist_phases` | `True / 48*300 / 2`（每阶段 300 iter 内 1→0 退火，之后无辅助） |
 | 倒地方向课程长度 | `CURRICULUM_PHASE_STEPS` | `48*300`（=300 iter/阶段；若改 num_steps_per_env 需同步换算） |
 | 恢复任务方向随机 | `EventCfgRecovery.reset_root.phase_steps` | `0`（每个 episode 正/负随机，不按课程） |
-| 高度区间 / curriculum | `HEIGHT_COMMAND_RANGE` / `HEIGHT_CURRICULUM_STEPS` | `(0.172, 0.270)` / `48*800`（0.270 已接近运动学极限 0.2825，再大闭链换分支） |
+| 高度区间 / curriculum | `HEIGHT_COMMAND_RANGE` / `HEIGHT_CURRICULUM_STEPS` | `(0.172, 0.270)` / `48*1500`（0.270 接近运动学极限 0.2825；课程慢放开防"站最低忽略指令"） |
+| 左右对称（防劈叉） | `RewardsCfg.hip_symmetry / wheel_symmetry` | `-2.0`（髋角左右差²）/ `-0.02`（轮速差²） |
 | 起始姿态（倒地↔站立） | `EventCfg.reset_root.pose_range.pitch` | 倒地 `(0.24,0.34)`；站立改 `(-0.05,0.05)` |
 | 阶段2 倒地时腿长 | `EventCfgHeight.reset_hips`（`RETRACTED_HIPS`/`noise`） | 默认收到最短（q=0）；阶段1 用 squat ±0.02 |
 | 阶段2 开局收腿稳定 | `ActionsCfgStage2.wheel_leg.settle_steps / settle_hip_kp / settle_hip_kd` | 20 步（0.4 s）/ 300 / 10；阶段1 为 0 |

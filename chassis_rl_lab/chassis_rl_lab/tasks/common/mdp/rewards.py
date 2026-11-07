@@ -44,8 +44,11 @@ __all__ = [
     "pitch_progress",
     "base_height",
     "base_height_track",
+    "height_error_l2",
     "height_rate_l2",
     "hip_posture",
+    "hip_symmetry_l2",
+    "wheel_symmetry_l2",
     # 惩罚
     "wheel_vel_l2",
     "base_lin_vel_xy_l2",
@@ -244,3 +247,36 @@ def height_rate_l2(env, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> 
     """机身垂直速度平方 ``h_dot^2``（惩罚，防止靠上下猛甩来取巧）。"""
     asset: Articulation = env.scene[asset_cfg.name]
     return _finite(torch.square(asset.data.root_lin_vel_w[:, 2]))
+
+
+def hip_symmetry_l2(env, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    """左右腿髋角对称惩罚：``(q_LF - q_RF)^2 + (q_LB - q_RB)^2``（rad²）。
+
+    用于抑制"一条腿在前、一条腿在后"的劈叉站姿。HIP_ORDER = (LF, LB, RF, RB)。
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    joint_ids = selected_joint_ids(asset, asset_cfg, HIP_ORDER)
+    q = asset.data.joint_pos[:, joint_ids]
+    return _finite(torch.square(q[:, 0] - q[:, 2]) + torch.square(q[:, 1] - q[:, 3]))
+
+
+def wheel_symmetry_l2(env, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    """左右轮速度差惩罚：``(v_L - v_R)^2``，抑制劈叉时两侧轮速不一致。"""
+    asset: Articulation = env.scene[asset_cfg.name]
+    joint_ids = selected_joint_ids(asset, asset_cfg, WHEEL_ORDER)
+    vel = asset.data.joint_vel[:, joint_ids]
+    return _finite(torch.square(vel[:, 0] - vel[:, 1]))
+
+def height_error_l2(env, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    """高度跟踪误差平方 ``(h - h_cmd)^2``（单位 m²，用于负权重惩罚）。
+
+    与 ``base_height_track``（指数核，误差大时饱和为 0、无梯度）互补：
+    该项在**大误差时给出持续梯度**，避免策略退化成"腿收回、站最低、忽略高度指令"。
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    if hasattr(env, "height_command") and env.height_command is not None:
+        target = env.height_command[:, 0]
+    else:
+        target = squat_targets(asset.device)["base_height"]
+    height = asset.data.root_pos_w[:, 2]
+    return _finite(torch.square(height - target))

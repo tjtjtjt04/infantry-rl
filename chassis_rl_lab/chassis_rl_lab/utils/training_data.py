@@ -17,17 +17,24 @@
     README.md           人读摘要
     env.yaml / agent.yaml   训练用的环境/算法配置（从 run 目录拷贝）
     plots/
-        01_train.png            平均奖励 / 平均 episode 长度
+        00_height_tracking.png  Height 任务：目标高度 vs 当前高度 / 误差
+    01_train.png            平均奖励 / 平均 episode 长度
         02_episode_reward.png   Episode_Reward/* 各分项
         03_termination.png      Episode_Termination/* 终止比例
         04_losses.png           value/surrogate/entropy loss
         05_policy_lr.png        learning rate / action std
         06_perf.png             FPS / 采样与学习耗时
+        07_base_state.png       机体高度 / pitch-roll / 速度
+        08_joint_positions.png  各关节位置（hip/knee/wheel）
+        09_joint_velocities.png 各关节速度
+        10_joint_torques.png    各关节力矩
 
 图表使用 matplotlib Agg 后端（无窗口），tag 名直接做坐标轴标签（英文，避免字体问题）。
 """
 
 from __future__ import annotations
+
+import fnmatch
 
 import json
 import shutil
@@ -38,6 +45,11 @@ __all__ = ["export_training_data"]
 
 #: 每个图文件包含的 TensorBoard tag 列表（tag 不存在时自动跳过）
 _PLOT_GROUPS: dict[str, dict[str, list[str]]] = {
+    # "目标 vs 当前"：Height 任务的指令高度与实际机体高度（其它任务无这些 tag 时自动跳过）
+    "00_height_tracking.png": {
+        "Height target / now [m]": ["Height/target", "Height/now"],
+        "Height error [m]": ["Height/error"],
+    },
     "01_train.png": {
         "Train/mean_reward": ["Train/mean_reward"],
         "Train/mean_episode_length": ["Train/mean_episode_length"],
@@ -59,10 +71,60 @@ _PLOT_GROUPS: dict[str, dict[str, list[str]]] = {
         "FPS": ["Perf/total_fps"],
         "Collection / learning time": ["Perf/collection_time", "Perf/learning_time"],
     },
+    # 机体姿态/速度（实际表现）
+    "07_base_state.png": {
+        "Base height [m]": ["State/base_height"],
+        "Pitch / roll [deg]": ["State/pitch_deg", "State/roll_deg"],
+        "Base lin vel xy / ang vel z": ["State/lin_vel_xy", "State/ang_vel_z"],
+        "Hip split (left-right mismatch) [rad]": ["State/hip_split"],
+    },
+    # 每个关节的实际行为（位置/速度/力矩）
+    "08_joint_positions.png": {
+        "Hip positions [rad]": ["Joint/*hip_pos"],
+        "Knee positions [rad]": ["Joint/*knee_pos"],
+        "Wheel positions [rad]": ["Joint/wheel*_pos"],
+    },
+    "09_joint_velocities.png": {
+        "Hip velocities [rad/s]": ["Joint/*hip_vel"],
+        "Knee velocities [rad/s]": ["Joint/*knee_vel"],
+        "Wheel velocities [rad/s]": ["Joint/wheel*_vel"],
+    },
+    "10_joint_torques.png": {
+        "Hip torques [Nm]": ["Joint/*hip_tau"],
+        "Knee torques [Nm]": ["Joint/*knee_tau"],
+        "Wheel torques [Nm]": ["Joint/wheel*_tau"],
+    },
 }
 
 #: 长格式 CSV 列
 _CSV_HEADER = "iteration,tag,value\n"
+#: 高度跟踪（目标 vs 当前）专用 CSV 列
+_HEIGHT_CSV_HEADER = "iteration,height_target,height_now,height_error\n"
+
+
+def _write_height_tracking_csv(
+    scalars: dict[str, list[tuple[int, float]]], out_dir: Path
+) -> str | None:
+    """写 ``height_tracking.csv``（目标高度/当前高度/误差，按 iteration 对齐）。
+
+    Height 任务训练时由精简 logger 每轮写 ``Height/target|now|error`` 到 TensorBoard；
+    这里把它们导出成一张宽表，方便直接看"目标 vs 当前"。没有这些 tag 时跳过。
+    """
+    target = dict(scalars.get("Height/target", []))
+    now = dict(scalars.get("Height/now", []))
+    error = dict(scalars.get("Height/error", []))
+    steps = sorted(set(target) | set(now) | set(error))
+    if not steps:
+        return None
+    path = out_dir / "height_tracking.csv"
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(_HEIGHT_CSV_HEADER)
+        for step in steps:
+            handle.write(
+                f"{step},{target.get(step, float('nan')):.6f},{now.get(step, float('nan')):.6f},"
+                f"{error.get(step, float('nan')):.6f}\n"
+            )
+    return path.name
 
 
 def _find_event_files(log_dir: Path) -> list[Path]:
@@ -94,12 +156,11 @@ def _load_scalars(log_dir: Path) -> dict[str, list[tuple[int, float]]]:
 
 
 def _expand_group(scalars: dict[str, list[tuple[int, float]]], patterns: list[str]) -> list[str]:
-    """把 ``Episode_Reward/*`` 这类通配展开成实际存在的 tag 列表（保持稳定排序）。"""
+    """把 ``Episode_Reward/*``、``Joint/*hip_pos`` 这类通配展开成实际存在的 tag 列表。"""
     tags: list[str] = []
     for pattern in patterns:
-        if pattern.endswith("*"):
-            prefix = pattern[:-1]
-            tags.extend(sorted(t for t in scalars if t.startswith(prefix)))
+        if any(ch in pattern for ch in "*?["):
+            tags.extend(sorted(fnmatch.filter(scalars.keys(), pattern)))
         elif pattern in scalars:
             tags.append(pattern)
     # 去重并保持顺序
@@ -199,7 +260,10 @@ def export_training_data(
             for step, value in scalars[tag]:
                 handle.write(f"{step},{tag},{value:.8g}\n")
 
-    # 2) 图
+    # 2) 高度跟踪专用 CSV（目标 vs 当前）
+    height_csv = _write_height_tracking_csv(scalars, out_dir)
+
+    # 3) 图
     plot_files = _write_plots(scalars, out_dir / "plots")
 
     # 3) 拷贝配置
@@ -225,6 +289,7 @@ def export_training_data(
         "num_tags": len(scalars),
         "tags": {tag: _tag_summary(points) for tag, points in sorted(scalars.items())},
         "plots": plot_files,
+        "height_tracking_csv": height_csv,
         "configs": configs,
         "checkpoints": checkpoints,
         "latest_checkpoint": checkpoints[-1] if checkpoints else None,
