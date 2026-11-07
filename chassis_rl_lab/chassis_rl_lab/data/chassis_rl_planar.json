@@ -1,0 +1,327 @@
+{
+  "source_urdf": "D:\\Robomaster\\RL\\chassis_rl_lab\\chassis_rl_lab\\assets\\chassis-rl\\urdf\\chassis-rl-sim.urdf",
+  "source_cad_urdf": "D:\\Robomaster\\RL\\chassis_rl_lab\\chassis_rl_lab\\assets\\chassis-rl\\urdf\\chassis-rl.urdf",
+  "generated_by": "tools/fit_planar_model.py",
+  "units": "m, rad",
+  "convention": "所有关节以绕世界 +y 轴右手定则旋转为正（从 +y 看向 -y 逆时针），左右同号。平面角度约定 phi = atan2(-z, x)：base_link 系 x-z 投影，从 +x 起、向下（-z）为正；对某关节施加 q 即在对应连杆的绝对角上加 q。q = 0 = CAD 装配位 = 机械行程收回端。正转 = 前 hip/后 hip 向下摆（腿伸长），前膝负转 = 伸长，后膝正转 = 伸长，轮子正转 = 车体向 +x（前进）。y 分量对闭链无影响：各链在平行的 y 平面内绕 +y/-y 轴转动，闭链条件为 x-z 平面内前链轮轴点与后链轴孔锚点重合。",
+  "symmetry": {
+    "normalized": true,
+    "note": "物理上左右腿是精确镜像；但 CAD 导出的右髋 origin rpy=0 0 -3.1416 是 -pi 的舍入（误差 7.35e-6 rad），右侧 loop 锚点写作 -0.21772998（左侧 +0.21773），直接提取会使左右平面参数相差约 4e-7 m、右侧 CAD 位闭链残差约 1.6e-9 m。为满足“对称姿态左右同值”与“CAD 位闭链 < 1e-9”，平面模型采用左侧精确提取值并精确镜像到右侧；右侧 CAD 原始提取值与本模型的偏差记录在 cad_raw 中，verify_kinematics.py 会断言其 <= 1e-6。",
+    "raw_left_right_max_deviation": 6.060689661246954e-07,
+    "raw_cad_pose_closure": {
+      "left": 2.7755575615628914e-17,
+      "right": 1.6299411542686215e-09
+    },
+    "cad_raw": {
+      "left": {
+        "hip_front": [
+          0.071525,
+          0.030406
+        ],
+        "hip_back": [
+          -0.078475,
+          0.030406
+        ],
+        "ham_front": [
+          0.14273,
+          0.025547000000000004
+        ],
+        "ham_back": [
+          -0.14272999999999997,
+          0.025549
+        ],
+        "calf_front": [
+          -0.21773,
+          -0.15966
+        ],
+        "calf_back": [
+          0.21773,
+          -0.159662
+        ],
+        "zero_angles": {
+          "ham_front": -0.17711281562785824,
+          "ham_back": -2.964466260503369,
+          "calf_front": 2.508869703606351,
+          "calf_back": 0.6327289235365267
+        }
+      },
+      "right": {
+        "hip_front": [
+          0.071525,
+          0.030406
+        ],
+        "hip_back": [
+          -0.078475,
+          0.030406
+        ],
+        "ham_front": [
+          0.1427298457215341,
+          0.025547000000000004
+        ],
+        "ham_back": [
+          -0.14273013590473727,
+          0.025549
+        ],
+        "calf_front": [
+          -0.21773025671442928,
+          -0.15966
+        ],
+        "calf_back": [
+          0.21772972328190096,
+          -0.159662
+        ],
+        "zero_angles": {
+          "ham_front": -0.177113003092754,
+          "ham_back": -2.9644664256540123,
+          "calf_front": 2.508870265860195,
+          "calf_back": 0.6327295296054928
+        }
+      }
+    }
+  },
+  "cad_pose": {
+    "wheel_axle_3d": [
+      -0.003475000000000006,
+      0.22425499999999998,
+      -0.103707
+    ],
+    "axle_xz": [
+      -0.003475000000000006,
+      -0.103707
+    ],
+    "base_height": 0.1717070043477914,
+    "closure_left": 2.7755575615628914e-17,
+    "closure_right": 1.6299411542686215e-09
+  },
+  "wheel_radius": 0.06800000434779141,
+  "wheel_radius_source": "D:\\Robomaster\\RL\\chassis_rl_lab\\chassis_rl_lab\\assets\\chassis-rl\\meshes\\left_wheel.STL",
+  "wheel_radius_measure": {
+    "method": "二进制 STL 全部顶点 r = max hypot(x, z)（轮子绕 y 轴）",
+    "left": {
+      "path": "D:\\Robomaster\\RL\\chassis_rl_lab\\chassis_rl_lab\\assets\\chassis-rl\\meshes\\left_wheel.STL",
+      "n_triangles": 17152,
+      "n_vertices": 51456,
+      "radius": 0.06800000434779141,
+      "radius_p99_9": 0.06800000294073605,
+      "y_min": -0.014750000089406967,
+      "y_max": 0.011250000447034836
+    },
+    "right": {
+      "path": "D:\\Robomaster\\RL\\chassis_rl_lab\\chassis_rl_lab\\assets\\chassis-rl\\meshes\\right_wheel.STL",
+      "n_triangles": 17138,
+      "n_vertices": 51414,
+      "radius": 0.06800000434779141,
+      "radius_p99_9": 0.06800000294073605,
+      "y_min": -0.014750000089406967,
+      "y_max": 0.011250000447034836
+    }
+  },
+  "sides": {
+    "left": {
+      "hip_front": [
+        0.071525,
+        0.030406
+      ],
+      "hip_back": [
+        -0.078475,
+        0.030406
+      ],
+      "ham_front": [
+        0.14273,
+        0.025547000000000004
+      ],
+      "ham_back": [
+        -0.14272999999999997,
+        0.025549
+      ],
+      "calf_front": [
+        -0.21773,
+        -0.15966
+      ],
+      "calf_back": [
+        0.21773,
+        -0.159662
+      ],
+      "limits": {
+        "front_hip": [
+          -0.0001,
+          1.48894
+        ],
+        "back_hip": [
+          -1.489639,
+          0.0001
+        ],
+        "front_knee": [
+          -1.999047,
+          0.0001
+        ],
+        "back_knee": [
+          -0.0001,
+          1.9995
+        ]
+      },
+      "wheel_radius": 0.06800000434779141,
+      "derived": {
+        "ham_front_len": 0.1449982831243184,
+        "ham_front_zero": -0.17711281562785824,
+        "ham_back_len": 0.14499863551426956,
+        "ham_back_zero": -2.964466260503369,
+        "calf_front_len": 0.26999568237288535,
+        "calf_front_zero": 2.508869703606351,
+        "calf_back_len": 0.2699968650632818,
+        "calf_back_zero": 0.6327289235365267
+      },
+      "zero_pose": {
+        "knee_front": [
+          0.214255,
+          0.055953
+        ],
+        "axle_front": [
+          -0.003475000000000006,
+          -0.103707
+        ],
+        "knee_back": [
+          -0.22120499999999998,
+          0.055955
+        ],
+        "axle_back": [
+          -0.003474999999999978,
+          -0.103707
+        ]
+      },
+      "note": "平面几何取左侧精确值并精确镜像（见顶层 symmetry 字段）"
+    },
+    "right": {
+      "hip_front": [
+        0.071525,
+        0.030406
+      ],
+      "hip_back": [
+        -0.078475,
+        0.030406
+      ],
+      "ham_front": [
+        0.14273,
+        0.025547000000000004
+      ],
+      "ham_back": [
+        -0.14272999999999997,
+        0.025549
+      ],
+      "calf_front": [
+        -0.21773,
+        -0.15966
+      ],
+      "calf_back": [
+        0.21773,
+        -0.159662
+      ],
+      "limits": {
+        "front_hip": [
+          -0.0001,
+          1.48894
+        ],
+        "back_hip": [
+          -1.489639,
+          0.0001
+        ],
+        "front_knee": [
+          -1.999047,
+          0.0001
+        ],
+        "back_knee": [
+          -0.0001,
+          1.9995
+        ]
+      },
+      "wheel_radius": 0.06800000434779141,
+      "derived": {
+        "ham_front_len": 0.1449982831243184,
+        "ham_front_zero": -0.17711281562785824,
+        "ham_back_len": 0.14499863551426956,
+        "ham_back_zero": -2.964466260503369,
+        "calf_front_len": 0.26999568237288535,
+        "calf_front_zero": 2.508869703606351,
+        "calf_back_len": 0.2699968650632818,
+        "calf_back_zero": 0.6327289235365267
+      },
+      "zero_pose": {
+        "knee_front": [
+          0.214255,
+          0.055953
+        ],
+        "axle_front": [
+          -0.003475000000000006,
+          -0.103707
+        ],
+        "knee_back": [
+          -0.22120499999999998,
+          0.055955
+        ],
+        "axle_back": [
+          -0.003474999999999978,
+          -0.103707
+        ]
+      },
+      "note": "平面几何取左侧精确值并精确镜像（见顶层 symmetry 字段）"
+    }
+  },
+  "joint_limits": {
+    "left_front_hip": [
+      -0.0001,
+      1.48894
+    ],
+    "left_front_knee": [
+      -1.999047,
+      0.0001
+    ],
+    "wheel_left": [
+      null,
+      null
+    ],
+    "left_back_hip": [
+      -1.489639,
+      0.0001
+    ],
+    "left_back_knee": [
+      -0.0001,
+      1.9995
+    ],
+    "right_back_hip": [
+      -1.489639,
+      0.0001
+    ],
+    "right_back_knee": [
+      -0.0001,
+      1.9995
+    ],
+    "right_front_hip": [
+      -0.0001,
+      1.48894
+    ],
+    "right_front_knee": [
+      -1.999047,
+      0.0001
+    ],
+    "wheel_right": [
+      null,
+      null
+    ]
+  },
+  "hip_order": [
+    "left_front_hip",
+    "left_back_hip",
+    "right_front_hip",
+    "right_back_hip"
+  ],
+  "knee_order": [
+    "left_front_knee",
+    "left_back_knee",
+    "right_front_knee",
+    "right_back_knee"
+  ],
+  "wheel_order": [
+    "wheel_left",
+    "wheel_right"
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "hips": {
+    "left_front_hip": 0.034966003417968766,
+    "left_back_hip": -0.034966003417968766,
+    "right_front_hip": 0.034966003417968766,
+    "right_back_hip": -0.034966003417968766
+  },
+  "knees": {
+    "left_front_knee": -0.029901010674671463,
+    "left_back_knee": 0.029901005198029768,
+    "right_front_knee": -0.029901010674671463,
+    "right_back_knee": 0.029901005198029768
+  },
+  "base_height": 0.17560745656417576,
+  "wheel_radius": 0.06800000434779141,
+  "limits_margin": 0.03,
+  "termination": {
+    "base_too_low": 0.12560745656417577,
+    "base_too_high": 0.3256074565641758,
+    "tilt_rad": 0.5
+  },
+  "hips_delta": 0.034966003417968766,
+  "margins": {
+    "left_front_hip": 0.03506600341796877,
+    "left_back_hip": 0.03506600341796877,
+    "right_front_hip": 0.03506600341796877,
+    "right_back_hip": 0.03506600341796877,
+    "left_front_knee": 0.030001010674671463,
+    "left_back_knee": 0.030001005198029767,
+    "right_front_knee": 0.030001010674671463,
+    "right_back_knee": 0.030001005198029767
+  },
+  "closure_residual": {
+    "left": 3.1031676915590914e-17,
+    "right": 3.1031676915590914e-17
+  },
+  "base_height_side": {
+    "left": 0.17560745656417576,
+    "right": 0.17560745656417576
+  },
+  "search": {
+    "objective": "最小 base_height（最深）s.t. 4 个 hip + 4 个 knee 相对限位 margin >= 0.03 rad",
+    "symmetry": "front_hip = +delta, back_hip = -delta, 左右相同；knees 由闭链解算",
+    "method": "粗扫描(步长 0.002 rad)定界 + 二分细化(tol 1e-7 rad)，warm start 保持物理装配支路",
+    "note": "q=0 是机械行程收回端，base height 随 delta 单调上升；因此最深的可行姿态即满足 margin 的最小 delta",
+    "deeper_check": {
+      "delta": 0.033966003417968765,
+      "min_margin": 0.029131007375447087,
+      "base_height": 0.1754923397408396
+    }
+  },
+  "convention": "所有关节以绕世界 +y 轴右手定则旋转为正（从 +y 看向 -y 逆时针），左右同号。平面角度约定 phi = atan2(-z, x)：base_link 系 x-z 投影，从 +x 起、向下（-z）为正；对某关节施加 q 即在对应连杆的绝对角上加 q。q = 0 = CAD 装配位 = 机械行程收回端。正转 = 前 hip/后 hip 向下摆（腿伸长），前膝负转 = 伸长，后膝正转 = 伸长，轮子正转 = 车体向 +x（前进）。y 分量对闭链无影响：各链在平行的 y 平面内绕 +y/-y 轴转动，闭链条件为 x-z 平面内前链轮轴点与后链轴孔锚点重合。",
+  "source_planar_json": "chassis_rl_lab/data/chassis_rl_planar.json",
+  "generated_by": "tools/fit_planar_model.py"
+}
