@@ -69,7 +69,7 @@ Wheel-Legged-Gym `noise_scales` (applied before the obs scale):
 | projected_gravity | ±0.05 | ±0.05 |
 | command | 0 | 0 |
 | hip_pos | ±0.01 rad | ±0.01 |
-| joint_vel | ±1.5 rad/s | ±0.15 |
+| joint_vel | ±1.5 rad/s | ±0.075 |
 | last_action | 0 | 0 |
 
 Scale/toggle with env vars: `INFANTRY_RL_OBS_NOISE_LEVEL` (default 1.0),

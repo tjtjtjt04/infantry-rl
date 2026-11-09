@@ -304,7 +304,7 @@ class SquatObservationsCfg:
     Per frame (25 dims)::
 
         [base_ang_vel(3)*0.25, projected_gravity(3), command(3),
-         hip_pos_rel_locked(4), joint_vel(6)*0.1, last_action(6)]
+         hip_pos_rel_locked(4), joint_vel(6)*0.05, last_action(6)]
 
     The group emits the flattened 5-frame history ``(125,)`` in oldest-to-newest
     order.  The custom actor in ``policy_model.py`` splits it into the current 25

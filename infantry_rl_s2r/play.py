@@ -78,6 +78,7 @@ from isaaclab.utils.dict import print_dict  # noqa: E402
 
 import agent as agent_lib  # noqa: E402
 from config import DEFAULT_LOG_ROOT, normalize_task  # noqa: E402
+from env_getup import FiveBarGetupEnv, GetupEnvCfg_PLAY  # noqa: E402
 from env_squat import (  # noqa: E402
     SQUAT_BASE_HEIGHT,
     FiveBarSquatEnv,
@@ -86,17 +87,27 @@ from env_squat import (  # noqa: E402
 
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg  # noqa: E402
 
+#: task -> (play cfg class, env class); identical observation/action layout
+PLAY_ENV_CFGS: dict[str, type] = {
+    "squat_torque": SquatEnvCfg_PLAY,
+    "getup_torque": GetupEnvCfg_PLAY,
+}
+PLAY_ENV_CLASSES: dict[str, type] = {
+    "squat_torque": FiveBarSquatEnv,
+    "getup_torque": FiveBarGetupEnv,
+}
+
 
 def build_play_env(task: str, num_envs: int | None, device: str, seed: int, render_mode: str | None = None):
-    if task != "squat_torque":
-        raise ValueError(f"unknown task {task!r}; only 'squat_torque' exists")
-    env_cfg = SquatEnvCfg_PLAY()
+    if task not in PLAY_ENV_CFGS:
+        raise ValueError(f"unknown task {task!r}; expected one of {tuple(PLAY_ENV_CFGS)}")
+    env_cfg = PLAY_ENV_CFGS[task]()
     if num_envs is not None:
         env_cfg.scene.num_envs = num_envs
     env_cfg.seed = seed
     env_cfg.sim.device = device
     env_cfg.log_dir = os.path.join(os.getcwd(), "logs", "play")
-    return FiveBarSquatEnv(cfg=env_cfg, render_mode=render_mode)
+    return PLAY_ENV_CLASSES[task](cfg=env_cfg, render_mode=render_mode)
 
 
 def run_check(env, task: str) -> int:

@@ -3,3 +3,6 @@ logs/
 *.usd
 report/*.docx
 report/*.pdf
+__pycache__/
+*.pyc
+.acl-reports/

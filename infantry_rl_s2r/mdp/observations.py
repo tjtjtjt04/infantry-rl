@@ -59,7 +59,7 @@ def joint_vel(env, action_name: str = "joints") -> torch.Tensor:
 
     The action term decides whether this is PhysX's joint velocity or an
     encoder-style position difference with an optional low-pass
-    (``vel_source`` / ``vel_filter_alpha``).  The term is scaled by ``0.1`` in the
+    (``vel_source`` / ``vel_filter_alpha``).  The term is scaled by ``0.05`` in the
     observation config, matching the deployment firmware.
     """
     return _action_term(env, action_name).measured_joint_vel()

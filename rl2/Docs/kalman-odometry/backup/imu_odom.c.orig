@@ -1,0 +1,251 @@
+#include "imu_odom.h"
+
+#include <math.h>
+#include <string.h>
+
+/* 状态: [x, y, vx, vy, bax, bay] */
+#define ODOM_DIM 6U
+
+#define ODOM_G               9.80665f
+#define ODOM_DEG2RAD         0.017453292519943295f
+#define ODOM_STATIC_ACCEL_TOL 0.35f    /* | |a| - g | 小于该值认为静止 (m/s²) */
+#define ODOM_STATIC_GYRO_TOL  0.03f    /* 陀螺模长小于该值认为静止 (rad/s) */
+#define ODOM_STATIC_COUNT     100U     /* 连续 100 次（1kHz 下 100ms）才触发 ZUPT */
+#define ODOM_ZUPT_R           1.0e-4f  /* 零速量测噪声方差 (m/s)² */
+
+#define ODOM_Q_POS   1.0e-12f
+#define ODOM_Q_VEL   1.0e-7f
+#define ODOM_Q_BIAS  1.0e-14f
+
+static void odom_mat_mul(const float A[ODOM_DIM * ODOM_DIM],
+                         const float B[ODOM_DIM * ODOM_DIM],
+                         float C[ODOM_DIM * ODOM_DIM])
+{
+    for (uint32_t i = 0U; i < ODOM_DIM; ++i) {
+        for (uint32_t j = 0U; j < ODOM_DIM; ++j) {
+            float sum = 0.0f;
+            for (uint32_t k = 0U; k < ODOM_DIM; ++k) {
+                sum += A[i * ODOM_DIM + k] * B[k * ODOM_DIM + j];
+            }
+            C[i * ODOM_DIM + j] = sum;
+        }
+    }
+}
+
+static void odom_mat_mul_bt(const float A[ODOM_DIM * ODOM_DIM],
+                            const float B[ODOM_DIM * ODOM_DIM],
+                            float C[ODOM_DIM * ODOM_DIM])
+{
+    for (uint32_t i = 0U; i < ODOM_DIM; ++i) {
+        for (uint32_t j = 0U; j < ODOM_DIM; ++j) {
+            float sum = 0.0f;
+            for (uint32_t k = 0U; k < ODOM_DIM; ++k) {
+                sum += A[i * ODOM_DIM + k] * B[j * ODOM_DIM + k];
+            }
+            C[i * ODOM_DIM + j] = sum;
+        }
+    }
+}
+
+static void odom_symmetrize(float P[ODOM_DIM * ODOM_DIM])
+{
+    for (uint32_t i = 0U; i < ODOM_DIM; ++i) {
+        for (uint32_t j = i + 1U; j < ODOM_DIM; ++j) {
+            const float v = 0.5f * (P[i * ODOM_DIM + j] + P[j * ODOM_DIM + i]);
+            P[i * ODOM_DIM + j] = v;
+            P[j * ODOM_DIM + i] = v;
+        }
+    }
+}
+
+void imu_odom_init(imu_odom_t *odom)
+{
+    if (odom == NULL) {
+        return;
+    }
+
+    memset(odom, 0, sizeof(*odom));
+
+    /* 初始协方差：位置/速度较确定，加速度计零偏不确定性大一些 */
+    odom->P[0 * ODOM_DIM + 0] = 1.0e-6f;
+    odom->P[1 * ODOM_DIM + 1] = 1.0e-6f;
+    odom->P[2 * ODOM_DIM + 2] = 1.0e-4f;
+    odom->P[3 * ODOM_DIM + 3] = 1.0e-4f;
+    odom->P[4 * ODOM_DIM + 4] = 2.5e-3f;
+    odom->P[5 * ODOM_DIM + 5] = 2.5e-3f;
+
+    odom->static_count = 0U;
+    odom->ready = 1U;
+}
+
+void imu_odom_update(imu_odom_t *odom,
+                     const float accel_body[3],
+                     const float gyro_body[3],
+                     float roll_deg,
+                     float pitch_deg,
+                     float yaw_deg,
+                     float dt_s)
+{
+    if ((odom == NULL) || (odom->ready == 0U) || (accel_body == NULL)
+        || (gyro_body == NULL) || (dt_s <= 0.0f)) {
+        return;
+    }
+
+    /* ---------- 静止检测（供 ZUPT 用） ---------- */
+    const float accel_norm = sqrtf(accel_body[0] * accel_body[0]
+                                 + accel_body[1] * accel_body[1]
+                                 + accel_body[2] * accel_body[2]);
+    const float gyro_norm  = sqrtf(gyro_body[0] * gyro_body[0]
+                                 + gyro_body[1] * gyro_body[1]
+                                 + gyro_body[2] * gyro_body[2]);
+
+    if ((fabsf(accel_norm - ODOM_G) < ODOM_STATIC_ACCEL_TOL)
+        && (gyro_norm < ODOM_STATIC_GYRO_TOL)) {
+        if (odom->static_count < ODOM_STATIC_COUNT) {
+            odom->static_count++;
+        }
+    } else {
+        odom->static_count = 0U;
+    }
+
+    /* ---------- 姿态角转弧度，计算机体系重力投影 ---------- */
+    const float roll  = roll_deg * ODOM_DEG2RAD;
+    const float pitch = pitch_deg * ODOM_DEG2RAD;
+    const float yaw   = yaw_deg * ODOM_DEG2RAD;
+
+    const float sr = sinf(roll);
+    const float cr = cosf(roll);
+    const float sp = sinf(pitch);
+    const float cp = cosf(pitch);
+    const float sy = sinf(yaw);
+    const float cy = cosf(yaw);
+
+    /* ZYX 欧拉角：重力在机体系的投影 g_b = R^T * (0,0,-g) */
+    const float gbx = ODOM_G * sp;
+    const float gby = -ODOM_G * sr * cp;
+    const float gbz = -ODOM_G * cr * cp;
+
+    /* 扣掉重力后的机体线加速度（未扣零偏） */
+    const float alx_raw = accel_body[0] + gbx;
+    const float aly_raw = accel_body[1] + gby;
+
+    /* 静止时顺便学习加速度计水平零偏，加速收敛/抑制静态漂移 */
+    if (odom->static_count > 0U) {
+        odom->bax += 0.0005f * (alx_raw - odom->bax);
+        odom->bay += 0.0005f * (aly_raw - odom->bay);
+    }
+
+    const float alx = alx_raw - odom->bax;
+    const float aly = aly_raw - odom->bay;
+    const float alz = accel_body[2] + gbz;
+
+    /* 机体系 -> 世界系（R = Rz(yaw)·Ry(pitch)·Rx(roll)） */
+    const float r00 = cy * cp;
+    const float r01 = cy * sp * sr - sy * cr;
+    const float r02 = cy * sp * cr + sy * sr;
+    const float r10 = sy * cp;
+    const float r11 = sy * sp * sr + cy * cr;
+    const float r12 = sy * sp * cr - cy * sr;
+
+    const float ax = r00 * alx + r01 * aly + r02 * alz;
+    const float ay = r10 * alx + r11 * aly + r12 * alz;
+
+    /* ---------- 状态预测 ---------- */
+    float s[ODOM_DIM];
+    s[0] = odom->x;
+    s[1] = odom->y;
+    s[2] = odom->vx;
+    s[3] = odom->vy;
+    s[4] = odom->bax;
+    s[5] = odom->bay;
+
+    s[0] += s[2] * dt_s + 0.5f * ax * dt_s * dt_s;
+    s[1] += s[3] * dt_s + 0.5f * ay * dt_s * dt_s;
+    s[2] += ax * dt_s;
+    s[3] += ay * dt_s;
+
+    /* 状态转移矩阵 F */
+    float F[ODOM_DIM * ODOM_DIM];
+    memset(F, 0, sizeof(F));
+    for (uint32_t i = 0U; i < ODOM_DIM; ++i) {
+        F[i * ODOM_DIM + i] = 1.0f;
+    }
+    F[0 * ODOM_DIM + 2] = dt_s;
+    F[1 * ODOM_DIM + 3] = dt_s;
+
+    F[0 * ODOM_DIM + 4] = -0.5f * dt_s * dt_s * r00;
+    F[0 * ODOM_DIM + 5] = -0.5f * dt_s * dt_s * r01;
+    F[1 * ODOM_DIM + 4] = -0.5f * dt_s * dt_s * r10;
+    F[1 * ODOM_DIM + 5] = -0.5f * dt_s * dt_s * r11;
+    F[2 * ODOM_DIM + 4] = -dt_s * r00;
+    F[2 * ODOM_DIM + 5] = -dt_s * r01;
+    F[3 * ODOM_DIM + 4] = -dt_s * r10;
+    F[3 * ODOM_DIM + 5] = -dt_s * r11;
+
+    /* P = F·P·Fᵀ + Q */
+    float FP[ODOM_DIM * ODOM_DIM];
+    float FPFt[ODOM_DIM * ODOM_DIM];
+    odom_mat_mul(F, odom->P, FP);
+    odom_mat_mul_bt(FP, F, FPFt);
+
+    for (uint32_t i = 0U; i < ODOM_DIM * ODOM_DIM; ++i) {
+        odom->P[i] = FPFt[i];
+    }
+    odom->P[0 * ODOM_DIM + 0] += ODOM_Q_POS;
+    odom->P[1 * ODOM_DIM + 1] += ODOM_Q_POS;
+    odom->P[2 * ODOM_DIM + 2] += ODOM_Q_VEL;
+    odom->P[3 * ODOM_DIM + 3] += ODOM_Q_VEL;
+    odom->P[4 * ODOM_DIM + 4] += ODOM_Q_BIAS;
+    odom->P[5 * ODOM_DIM + 5] += ODOM_Q_BIAS;
+    odom_symmetrize(odom->P);
+
+    /* ---------- 零速修正（ZUPT）：z = [0,0]，H 选出 vx/vy ---------- */
+    if (odom->static_count >= ODOM_STATIC_COUNT) {
+        const float s00 = odom->P[2 * ODOM_DIM + 2] + ODOM_ZUPT_R;
+        const float s01 = odom->P[2 * ODOM_DIM + 3];
+        const float s10 = odom->P[3 * ODOM_DIM + 2];
+        const float s11 = odom->P[3 * ODOM_DIM + 3] + ODOM_ZUPT_R;
+        const float det = s00 * s11 - s01 * s10;
+
+        if (fabsf(det) > 1.0e-12f) {
+            const float inv_det = 1.0f / det;
+            const float inv00 =  s11 * inv_det;
+            const float inv01 = -s01 * inv_det;
+            const float inv10 = -s10 * inv_det;
+            const float inv11 =  s00 * inv_det;
+
+            float K[ODOM_DIM][2];
+            for (uint32_t i = 0U; i < ODOM_DIM; ++i) {
+                const float a = odom->P[i * ODOM_DIM + 2];
+                const float b = odom->P[i * ODOM_DIM + 3];
+                K[i][0] = a * inv00 + b * inv10;
+                K[i][1] = a * inv01 + b * inv11;
+            }
+
+            /* 新息 y = 0 - vx, 0 - vy */
+            const float y0 = -s[2];
+            const float y1 = -s[3];
+            for (uint32_t i = 0U; i < ODOM_DIM; ++i) {
+                s[i] += K[i][0] * y0 + K[i][1] * y1;
+            }
+
+            /* P = (I - K·H)·P */
+            for (uint32_t i = 0U; i < ODOM_DIM; ++i) {
+                for (uint32_t j = 0U; j < ODOM_DIM; ++j) {
+                    const float kh = K[i][0] * odom->P[2 * ODOM_DIM + j]
+                                   + K[i][1] * odom->P[3 * ODOM_DIM + j];
+                    odom->P[i * ODOM_DIM + j] -= kh;
+                }
+            }
+            odom_symmetrize(odom->P);
+        }
+    }
+
+    /* ---------- 写回状态 ---------- */
+    odom->x   = s[0];
+    odom->y   = s[1];
+    odom->vx  = s[2];
+    odom->vy  = s[3];
+    odom->bax = s[4];
+    odom->bay = s[5];
+}

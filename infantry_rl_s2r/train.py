@@ -75,6 +75,8 @@ simulation_app = app_launcher.app
 import gymnasium as gym  # noqa: E402
 import torch  # noqa: E402
 
+import isaaclab.utils.math as math_utils  # noqa: E402
+
 from rsl_rl.runners import OnPolicyRunner  # noqa: E402
 
 from isaaclab.utils.dict import print_dict  # noqa: E402
@@ -87,6 +89,7 @@ from config import (  # noqa: E402
     HIP_EFFORT_LIMIT,
     normalize_task,
 )
+from env_getup import FiveBarGetupEnv, GetupEnvCfg  # noqa: E402
 from env_squat import (  # noqa: E402
     SQUAT_BASE_HEIGHT,
     FiveBarSquatEnv,
@@ -97,13 +100,20 @@ from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg 
 
 #: The env exposes a 5-frame history of the 25-D per-frame observation.
 #: The actor splits it into current 25 + encoder(125) -> 3 latent = 28 inputs.
+#: Both tasks use exactly this layout (the ONNX contract with the firmware).
 EXPECTED_OBS_DIM = 125
+
+#: task -> (env cfg class, env class).  ``getup_torque`` shares the observation and
+#: action layout with ``squat_torque`` on purpose, so checkpoints and the ONNX export
+#: are interchangeable between the two.
+ENV_CFGS: dict[str, type] = {"squat_torque": SquatEnvCfg, "getup_torque": GetupEnvCfg}
+ENV_CLASSES: dict[str, type] = {"squat_torque": FiveBarSquatEnv, "getup_torque": FiveBarGetupEnv}
 
 
 def build_env_cfg(task: str, num_envs: int | None, device: str, seed: int, log_dir: str):
-    if task != "squat_torque":
-        raise ValueError(f"unknown task {task!r}; only 'squat_torque' exists")
-    env_cfg = SquatEnvCfg()
+    if task not in ENV_CFGS:
+        raise ValueError(f"unknown task {task!r}; expected one of {tuple(ENV_CFGS)}")
+    env_cfg = ENV_CFGS[task]()
     if num_envs is not None:
         env_cfg.scene.num_envs = num_envs
     env_cfg.seed = seed
@@ -113,13 +123,89 @@ def build_env_cfg(task: str, num_envs: int | None, device: str, seed: int, log_d
 
 
 def make_env(task: str, env_cfg, render_mode: str | None = None):
-    if task != "squat_torque":
-        raise ValueError(f"unknown task {task!r}; only 'squat_torque' exists")
-    return FiveBarSquatEnv(cfg=env_cfg, render_mode=render_mode)
+    if task not in ENV_CLASSES:
+        raise ValueError(f"unknown task {task!r}; expected one of {tuple(ENV_CLASSES)}")
+    return ENV_CLASSES[task](cfg=env_cfg, render_mode=render_mode)
+
+
+def run_getup_checks(env, task: str) -> bool:
+    """Exercise the interfaces the fall-recovery task must get right.
+
+    Checks that the same 125/6 interface is in place, that the reset really starts the
+    robot on the ground (not standing, not inside it), and that a zero-action rollout
+    stays finite and does not terminate -- i.e. the measured contact height is right.
+    """
+    ok = True
+    cfg = env.cfg
+    n = cfg.scene.num_envs
+    robot = env.scene["robot"]
+    joint_action = env.action_manager.get_term(cfg.joint_action_name)
+    joint_action.set_action_delay(0)
+    joint_action.set_motor_torque_scale(1.0)
+    actions = torch.zeros((n, env.action_space.shape[-1]), device=env.device)
+
+    obs, _ = env.reset()
+    obs = obs["policy"] if isinstance(obs, dict) else obs
+    obs_dim = env.single_observation_space["policy"].shape[0]
+    print(
+        f"[check] obs shape={tuple(obs.shape)} (expected {EXPECTED_OBS_DIM}) "
+        f"finite={bool(torch.isfinite(obs).all())}"
+    )
+    ok &= obs_dim == EXPECTED_OBS_DIM
+    ok &= obs.shape == (n, obs_dim)
+    ok &= bool(torch.isfinite(obs).all())
+    print(f"[check] num_envs={n}  ep_steps={env.max_episode_length}  "
+          f"closure_max={env.max_closure_residual * 1000:.6f} mm")
+    ok &= env.max_closure_residual < 5e-3
+
+    _, pitch, _ = math_utils.euler_xyz_from_quat(robot.data.root_quat_w)
+    height = robot.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]
+    pitch_deg = torch.rad2deg(pitch)
+    print(
+        f"[check] reset pitch {pitch_deg.min().item():+.1f}..{pitch_deg.max().item():+.1f} deg "
+        f"(|pitch| >= 10 expected), base_z {height.min().item():.4f}..{height.max().item():.4f} m, "
+        f"reset mix: tripod 15-19 deg by default "
+        f"(INFANTRY_RL_GETUP_REST_PROB < 1 adds the 30-40 deg fall)"
+    )
+    ok &= bool((pitch_deg.abs() > 10.0).all())
+    ok &= bool((pitch_deg.abs() < 45.0).all())
+    ok &= bool((height > 0.14).all())
+    ok &= bool((height < 0.30).all())
+
+    obs, reward, terminated, truncated, extras = env.step(actions)
+    done = terminated | truncated
+    print(f"[check] initial zero step: done={int(done.sum())}/{n}")
+    ok &= not bool(done.any())
+
+    for step in range(60):
+        obs, reward, terminated, truncated, extras = env.step(actions)
+        obs = obs["policy"] if isinstance(obs, dict) else obs
+        ok &= bool(torch.isfinite(obs).all())
+        ok &= bool(torch.isfinite(reward).all())
+        done = terminated | truncated
+        ok &= not bool(done.any())
+
+    _, pitch, _ = math_utils.euler_xyz_from_quat(robot.data.root_quat_w)
+    height = robot.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]
+    rate = robot.data.root_ang_vel_b.norm(dim=-1)
+    print(
+        f"[check] after 0.6 s of zero action: pitch "
+        f"{torch.rad2deg(pitch).min().item():+.1f}..{torch.rad2deg(pitch).max().item():+.1f} deg, "
+        f"base_z {height.min().item():.4f}..{height.max().item():.4f} m, |rate| max "
+        f"{rate.max().item():.2f} rad/s"
+    )
+    ok &= bool((torch.rad2deg(pitch).abs() < 60.0).all())
+    ok &= bool((height > 0.10).all())
+    ok &= env.max_closure_residual < 5e-3
+
+    print("[check] RESULT:", "PASS" if ok else "FAIL")
+    return ok
 
 
 def run_env_checks(env, task: str) -> bool:
     """Exercise the interfaces that must work before a long training run."""
+    if task != "squat_torque":
+        return run_getup_checks(env, task)
     ok = True
     cfg = env.cfg
     robot = env.scene["robot"]

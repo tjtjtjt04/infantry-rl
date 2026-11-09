@@ -110,10 +110,17 @@ class InfantryPPORunnerCfg_PLAY(InfantryPPORunnerCfg):
 
 
 def make_agent_cfg(task: str, play: bool = False) -> RslRlOnPolicyRunnerCfg:
-    """Return a fresh runner config for the pure-torque squat task."""
-    if task != "squat_torque":
-        raise ValueError(f"unknown task {task!r}; only 'squat_torque' exists")
-    return InfantryPPORunnerCfg_PLAY() if play else InfantryPPORunnerCfg()
+    """Return a fresh runner config for a task (``squat_torque`` / ``getup_torque``).
+
+    ``getup_torque`` uses the same network and PPO settings on purpose: the
+    observation and action layouts are identical, so a ``squat_torque`` checkpoint
+    loads into it unchanged and keeps its balance behaviour while it learns recovery.
+    """
+    if task not in EXPERIMENT_NAMES:
+        raise ValueError(f"unknown task {task!r}; expected one of {tuple(EXPERIMENT_NAMES)}")
+    cfg = InfantryPPORunnerCfg_PLAY() if play else InfantryPPORunnerCfg()
+    cfg.experiment_name = EXPERIMENT_NAMES[task]
+    return cfg
 
 
 def apply_cli_overrides(agent_cfg: RslRlOnPolicyRunnerCfg, args) -> RslRlOnPolicyRunnerCfg:

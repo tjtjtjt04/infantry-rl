@@ -44,18 +44,22 @@ DEFAULT_LOG_ROOT: Path = PROJECT_DIR / "logs" / "rsl_rl"
 # --------------------------------------------------------------------------- #
 # Task names
 # --------------------------------------------------------------------------- #
-#: The hardware is torque controlled, so `squat_torque` is the only task.
-TASKS: tuple[str, ...] = ("squat_torque",)
+#: ``squat_torque`` -- balance on the locked squat stance (starts upright);
+#: ``getup_torque`` -- fall recovery from the ground (identical obs/action interface).
+TASKS: tuple[str, ...] = ("squat_torque", "getup_torque")
 
 #: old gym IDs still accepted on the command line
 TASK_ALIASES: dict[str, str] = {
     "Infantry-RL-SquatTorque-v0": "squat_torque",
     "Infantry-RL-SquatTorque-Play-v0": "squat_torque",
+    "Infantry-RL-GetupTorque-v0": "getup_torque",
+    "Infantry-RL-GetupTorque-Play-v0": "getup_torque",
 }
 
 #: rsl_rl experiment folder names
 EXPERIMENT_NAMES: dict[str, str] = {
     "squat_torque": "infantry_rl_squat_torque",
+    "getup_torque": "infantry_rl_getup_torque",
 }
 
 
@@ -66,7 +70,7 @@ def normalize_task(name: str | None) -> str:
     if name in TASK_ALIASES:
         return TASK_ALIASES[name]
     if name not in TASKS:
-        raise ValueError(f"unknown task {name!r}; expected {TASKS} or a legacy Infantry-RL-SquatTorque-* ID")
+        raise ValueError(f"unknown task {name!r}; expected {TASKS} or a legacy Infantry-RL-* ID")
     return name
 
 

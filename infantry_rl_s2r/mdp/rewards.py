@@ -119,6 +119,20 @@ def fall_penalty(env) -> torch.Tensor:
     return terminated.float()
 
 
+def recovery_success(env) -> torch.Tensor:
+    """1.0 on the single step a fall-recovery episode reaches the upright envelope.
+
+    ``env.getup_success`` is set by :func:`mdp.terminations.upright_stable` while the
+    termination manager runs, and the reward manager runs after it in the same step,
+    so this pays the terminal bonus exactly once, on the step that ends the episode.
+    The task clears the flag at reset.
+    """
+    flag = getattr(env, "getup_success", None)
+    if flag is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    return flag.float()
+
+
 def heading_l2(
     env,
     target_heading: float = 0.0,
@@ -296,6 +310,7 @@ __all__ = [
     "pitch_abs",
     "position_xy_alive",
     "position_xy_l2",
+    "recovery_success",
     "roll_abs",
     "wheel_spin_l2",
     "yaw_rate_l2",

@@ -1,0 +1,65 @@
+#ifndef IMU_ODOM_H
+#define IMU_ODOM_H
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * IMU 平面里程计（Kalman 滤波）
+ *
+ * 使用 BMI088 的加速度计 + EKF 输出的姿态角做航位推算：
+ *   - 用 roll/pitch 把加速度计里的重力分量扣掉，得到机体线加速度；
+ *   - 用 yaw 把机体加速度旋转到世界系，积分出速度、位置；
+ *   - 状态里估计 X/Y 加速度计零偏，抑制长时间积分漂移；
+ *   - 静止时（加速度模长≈g、角速度≈0）做零速修正（ZUPT）。
+ *
+ * 注意：纯 IMU 航位推算没有绝对位置参考，运动过程中位置会缓慢漂移，
+ * 需要外部速度/位置参考（轮速、视觉等）才能长期保持精度。
+ */
+typedef struct
+{
+    float x;       /**< 世界坐标 X（m） */
+    float y;       /**< 世界坐标 Y（m） */
+    float vx;      /**< 世界坐标 X 速度（m/s） */
+    float vy;      /**< 世界坐标 Y 速度（m/s） */
+    float bax;     /**< 机体 X 加速度计零偏（m/s²） */
+    float bay;     /**< 机体 Y 加速度计零偏（m/s²） */
+
+    float P[6 * 6];        /**< 状态协方差矩阵 */
+    uint16_t static_count; /**< 连续静止计数（用于 ZUPT） */
+    uint8_t ready;         /**< 初始化完成标志 */
+} imu_odom_t;
+
+/**
+ * @brief 初始化里程计状态与协方差。
+ * @param odom 待初始化句柄。
+ */
+void imu_odom_init(imu_odom_t *odom);
+
+/**
+ * @brief 单步更新里程计（建议 1kHz，与 EKF 同频）。
+ *
+ * @param odom       已初始化的句柄。
+ * @param accel_body 车体坐标系加速度（m/s²，应为 EKF.accel）。
+ * @param gyro_body  车体坐标系角速度（rad/s，用于静止检测）。
+ * @param roll_deg   EKF 输出的 roll（deg）。
+ * @param pitch_deg  EKF 输出的 pitch（deg）。
+ * @param yaw_deg    EKF 输出的 yaw（deg）。
+ * @param dt_s       本次采样间隔（s）。
+ */
+void imu_odom_update(imu_odom_t *odom,
+                     const float accel_body[3],
+                     const float gyro_body[3],
+                     float roll_deg,
+                     float pitch_deg,
+                     float yaw_deg,
+                     float dt_s);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* IMU_ODOM_H */

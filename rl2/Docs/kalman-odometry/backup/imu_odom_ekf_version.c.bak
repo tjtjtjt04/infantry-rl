@@ -1,0 +1,639 @@
+#include "imu_odom.h"
+
+#include "common_function.h"
+
+#include <math.h>
+#include <string.h>
+
+/* ==========================================================================
+ * imu_odom.c —— 轮式里程计实现（8 状态 EKF）
+ * ==========================================================================
+ * 状态顺序（与 imu_odom.h 中说明一致）：
+ *   s[0] = X     世界系 X 位置     (m)
+ *   s[1] = Y     世界系 Y 位置     (m)
+ *   s[2] = psi   航向角            (rad)
+ *   s[3] = v_f   沿航向速度        (m/s)
+ *   s[4] = v_s   垂直航向速度      (m/s)
+ *   s[5] = b_gz  陀螺 Z 零偏       (rad/s)
+ *   s[6] = b_ax  加计 X 零偏       (m/s²)
+ *   s[7] = b_ay  加计 Y 零偏       (m/s²)
+ *
+ * 连续模型（roll = φ、pitch = θ 由姿态 EKF 提供，视为已知输入）：
+ *   X_dot   = v_f·cosψ − v_s·sinψ
+ *   Y_dot   = v_f·sinψ + v_s·cosψ
+ *   ψ_dot   = (ω_y·sinφ + ω_z·cosφ)/cosθ − b_gz
+ *   v_f_dot = a_f + ψ_dot·v_s
+ *   v_s_dot = a_s − ψ_dot·v_f
+ *   a_f = [cθ, sθsφ, sθcφ]·(a_body − b_a)      （Ry(θ)Rx(φ) 第 1 行）
+ *   a_s = [0,  cφ,  −sφ ]·(a_body − b_a)      （Ry(θ)Rx(φ) 第 2 行）
+ *
+ * 两种工作模式（由 ODOM_STATIC_FREEZE 选择）：
+ *   运动：轮速块观测（速度 + 偏航角速度）+ 侧向零速约束；
+ *   静止：冻结位置/航向（不积分），跳过轮速观测，只保留
+ *         ZUPT（v=0）与 ZARU（偏航角速度=0，学陀螺 Z 零偏），不改姿态。
+ * ========================================================================== */
+
+/* 状态向量下标 */
+#define ODOM_IX    (0U)
+#define ODOM_IY    (1U)
+#define ODOM_IPSI  (2U)
+#define ODOM_IVF   (3U)
+#define ODOM_IVS   (4U)
+#define ODOM_IBGZ  (5U)
+#define ODOM_IBAX  (6U)
+#define ODOM_IBAY  (7U)
+
+#define ODOM_PI_F     (3.14159265358979323846f)
+#define ODOM_TWO_PI_F (6.28318530717958647692f)
+#define ODOM_G_MS2    (9.80665f)
+#define ODOM_EPS      (1.0e-9f)
+
+/* 矩阵元素下标：行优先，n = ODOM_DIM */
+#define ODOM_IDX(i, j) ((uint32_t)(i) * ODOM_DIM + (uint32_t)(j))
+
+imu_odom_t ODOM;
+
+/* ======================================================================
+ * 1. 基础矩阵工具
+ * ====================================================================== */
+
+/** C = A·B，A/B/C 均为 n×n（行优先） */
+static void odom_mat_mul(const float *A, const float *B, float *C, uint32_t n)
+{
+    uint32_t i;
+    uint32_t j;
+    uint32_t k;
+
+    for (i = 0U; i < n; ++i) {
+        for (j = 0U; j < n; ++j) {
+            float sum = 0.0f;
+            for (k = 0U; k < n; ++k) {
+                sum += A[i * n + k] * B[k * n + j];
+            }
+            C[i * n + j] = sum;
+        }
+    }
+}
+
+/** C = A·Bᵀ，A/B/C 均为 n×n（行优先） */
+static void odom_mat_mul_bt(const float *A, const float *B, float *C, uint32_t n)
+{
+    uint32_t i;
+    uint32_t j;
+    uint32_t k;
+
+    for (i = 0U; i < n; ++i) {
+        for (j = 0U; j < n; ++j) {
+            float sum = 0.0f;
+            for (k = 0U; k < n; ++k) {
+                sum += A[i * n + k] * B[j * n + k];
+            }
+            C[i * n + j] = sum;
+        }
+    }
+}
+
+/** 协方差对称化，并把对角元限制在合法范围，防浮点发散 */
+static void odom_symmetrize(float *P, uint32_t n)
+{
+    uint32_t i;
+    uint32_t j;
+
+    for (i = 0U; i < n; ++i) {
+        for (j = i + 1U; j < n; ++j) {
+            const float v = 0.5f * (P[i * n + j] + P[j * n + i]);
+            P[i * n + j] = v;
+            P[j * n + i] = v;
+        }
+    }
+    for (i = 0U; i < n; ++i) {
+        float d = P[i * n + i];
+        if (!isfinite(d) || (d < 0.0f)) {
+            d = 0.0f;
+        }
+        if (d > 1.0e6f) {
+            d = 1.0e6f;
+        }
+        P[i * n + i] = d;
+    }
+}
+
+/** 角度归一化到 (-pi, pi] */
+static float odom_wrap_pi(float angle)
+{
+    if (!isfinite(angle)) {
+        return 0.0f;
+    }
+    while (angle > ODOM_PI_F) {
+        angle -= ODOM_TWO_PI_F;
+    }
+    while (angle <= -ODOM_PI_F) {
+        angle += ODOM_TWO_PI_F;
+    }
+    return angle;
+}
+
+/* ======================================================================
+ * 2. 通用量测更新（m = 1 或 2 维）
+ * ======================================================================
+ * S = H·P·Hᵀ + R，K = P·Hᵀ·S⁻¹，s += K·(z − h)
+ * P = (I − K·H)·P·(I − K·H)ᵀ + K·R·Kᵀ（Joseph 形式，保证正定）
+ */
+static void odom_measurement_update(imu_odom_t *odom,
+                                    float s[ODOM_DIM],
+                                    const float z[2],
+                                    const float h[2],
+                                    const float (*H)[ODOM_DIM],
+                                    const float R[2][2],
+                                    uint32_t m)
+{
+    float S[2][2];
+    float Sinv[2][2];
+    float innov[2] = {0.0f, 0.0f};
+    uint32_t i;
+    uint32_t j;
+    uint32_t a;
+    uint32_t b;
+
+    /* ---- S = H·P·Hᵀ + R ---- */
+    for (a = 0U; a < m; ++a) {
+        for (b = 0U; b < m; ++b) {
+            float sum = R[a][b];
+            for (i = 0U; i < ODOM_DIM; ++i) {
+                for (j = 0U; j < ODOM_DIM; ++j) {
+                    sum += H[a][i] * odom->P[ODOM_IDX(i, j)] * H[b][j];
+                }
+            }
+            S[a][b] = sum;
+        }
+    }
+
+    /* ---- S 求逆（1×1 或 2×2） ---- */
+    if (m == 1U) {
+        if (fabsf(S[0][0]) < ODOM_EPS) {
+            return;
+        }
+        Sinv[0][0] = 1.0f / S[0][0];
+        Sinv[0][1] = 0.0f;
+        Sinv[1][0] = 0.0f;
+        Sinv[1][1] = 0.0f;
+    } else {
+        const float det = S[0][0] * S[1][1] - S[0][1] * S[1][0];
+        if (fabsf(det) < ODOM_EPS) {
+            return;
+        }
+        const float inv_det = 1.0f / det;
+        Sinv[0][0] = S[1][1] * inv_det;
+        Sinv[0][1] = -S[0][1] * inv_det;
+        Sinv[1][0] = -S[1][0] * inv_det;
+        Sinv[1][1] = S[0][0] * inv_det;
+    }
+
+    /* ---- PHt = P·Hᵀ ---- */
+    for (i = 0U; i < ODOM_DIM; ++i) {
+        for (a = 0U; a < m; ++a) {
+            float sum = 0.0f;
+            for (j = 0U; j < ODOM_DIM; ++j) {
+                sum += odom->P[ODOM_IDX(i, j)] * H[a][j];
+            }
+            odom->w_pht[i * 2U + a] = sum;
+        }
+    }
+
+    /* ---- K = PHt·S⁻¹ ---- */
+    for (i = 0U; i < ODOM_DIM; ++i) {
+        for (a = 0U; a < m; ++a) {
+            float sum = 0.0f;
+            for (b = 0U; b < m; ++b) {
+                sum += odom->w_pht[i * 2U + b] * Sinv[b][a];
+            }
+            odom->w_k[i * 2U + a] = sum;
+        }
+    }
+
+    /* ---- 新息与状态修正 ---- */
+    for (a = 0U; a < m; ++a) {
+        innov[a] = z[a] - h[a];
+    }
+    for (i = 0U; i < ODOM_DIM; ++i) {
+        float sum = 0.0f;
+        for (a = 0U; a < m; ++a) {
+            sum += odom->w_k[i * 2U + a] * innov[a];
+        }
+        s[i] += sum;
+    }
+
+    /* ---- A = I − K·H ---- */
+    for (i = 0U; i < ODOM_DIM; ++i) {
+        for (j = 0U; j < ODOM_DIM; ++j) {
+            float kh = 0.0f;
+            for (a = 0U; a < m; ++a) {
+                kh += odom->w_k[i * 2U + a] * H[a][j];
+            }
+            odom->w_a[ODOM_IDX(i, j)] = ((i == j) ? 1.0f : 0.0f) - kh;
+        }
+    }
+
+    /* ---- P = A·P·Aᵀ + K·R·Kᵀ ---- */
+    odom_mat_mul(odom->w_a, odom->P, odom->w_b, ODOM_DIM);
+    odom_mat_mul_bt(odom->w_b, odom->w_a, odom->w_c, ODOM_DIM);
+    for (i = 0U; i < ODOM_DIM; ++i) {
+        for (j = 0U; j < ODOM_DIM; ++j) {
+            float sum = 0.0f;
+            for (a = 0U; a < m; ++a) {
+                for (b = 0U; b < m; ++b) {
+                    sum += odom->w_k[i * 2U + a] * R[a][b] * odom->w_k[j * 2U + b];
+                }
+            }
+            odom->P[ODOM_IDX(i, j)] = odom->w_c[ODOM_IDX(i, j)] + sum;
+        }
+    }
+    odom_symmetrize(odom->P, ODOM_DIM);
+}
+
+/** 静止时的两组合观测：ZUPT（速度=0）+ ZARU（偏航角速度=0，估计陀螺 Z 零偏）。
+ *  只收紧速度方差、学陀螺 Z 零偏；不修改姿态角，也不动加计零偏。
+ */
+static void odom_static_observations(imu_odom_t *odom,
+                                     float s[ODOM_DIM],
+                                     float yaw_rate_body)
+{
+    /* ZUPT：v_f = v_s = 0 */
+    {
+        const float z[2] = {0.0f, 0.0f};
+        const float h[2] = {s[ODOM_IVF], s[ODOM_IVS]};
+        const float H[2][ODOM_DIM] = {
+            {0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f},
+            {0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f}
+        };
+        const float R[2][2] = {
+            {ODOM_R_ZUPT_MPS * ODOM_R_ZUPT_MPS, 0.0f},
+            {0.0f, ODOM_R_ZUPT_MPS * ODOM_R_ZUPT_MPS}
+        };
+
+        odom_measurement_update(odom, s, z, h, H, R, 2U);
+    }
+
+    /* ZARU：偏航角速度 = 0 -> 陀螺 Z 零偏 */
+    {
+        const float z[2] = {0.0f, 0.0f};
+        const float h[2] = {yaw_rate_body - s[ODOM_IBGZ], 0.0f};
+        const float H[1][ODOM_DIM] = {
+            {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f}
+        };
+        const float R[2][2] = {
+            {ODOM_R_ZARU_RPS * ODOM_R_ZARU_RPS, 0.0f},
+            {0.0f, 0.0f}
+        };
+
+        odom_measurement_update(odom, s, z, h, H, R, 1U);
+    }
+}
+
+/* 运动时的轮速观测：平均速度 + 轮速差对应的偏航角速度 */
+static void odom_wheel_observation(imu_odom_t *odom, float s[ODOM_DIM],
+                                   float yaw_rate_body)
+{
+    const float z[2] = {
+        0.5f * (odom->wheel_left_mps + odom->wheel_right_mps),
+        (odom->wheel_right_mps - odom->wheel_left_mps) / ODOM_TRACK_WIDTH_M
+    };
+    const float h[2] = {
+        s[ODOM_IVF],
+        yaw_rate_body - s[ODOM_IBGZ]
+    };
+    const float H[2][ODOM_DIM] = {
+        {0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f},
+        {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f}
+    };
+    const float R[2][2] = {
+        {ODOM_R_WHEEL_MPS * ODOM_R_WHEEL_MPS, 0.0f},
+        {0.0f, ODOM_R_WHEEL_YAW_RPS * ODOM_R_WHEEL_YAW_RPS}
+    };
+
+    odom_measurement_update(odom, s, z, h, H, R, 2U);
+}
+
+/* 运动时的侧向零速约束：v_s ~= 0 */
+static void odom_lateral_observation(imu_odom_t *odom, float s[ODOM_DIM])
+{
+    const float z[2] = {0.0f, 0.0f};
+    const float h[2] = {s[ODOM_IVS], 0.0f};
+    const float H[1][ODOM_DIM] = {
+        {0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f}
+    };
+    const float R[2][2] = {
+        {ODOM_R_LATERAL_MPS * ODOM_R_LATERAL_MPS, 0.0f},
+        {0.0f, 0.0f}
+    };
+
+    odom_measurement_update(odom, s, z, h, H, R, 1U);
+}
+
+/* ======================================================================
+ * 3. 对外接口
+ * ====================================================================== */
+
+void imu_odom_init(imu_odom_t *odom)
+{
+    if (odom == NULL) {
+        return;
+    }
+
+    memset(odom, 0, sizeof(*odom));
+
+    /* 初始协方差：位置/速度较确定，航向约 1°（rad²），零偏给残余不确定度
+     * （陀螺/加计零偏已在 BMI088driver 里做过六面标定） */
+    odom->P[ODOM_IDX(ODOM_IX, ODOM_IX)] = 1.0e-6f;
+    odom->P[ODOM_IDX(ODOM_IY, ODOM_IY)] = 1.0e-6f;
+    odom->P[ODOM_IDX(ODOM_IPSI, ODOM_IPSI)] = 3.0e-4f;
+    odom->P[ODOM_IDX(ODOM_IVF, ODOM_IVF)] = 1.0e-4f;
+    odom->P[ODOM_IDX(ODOM_IVS, ODOM_IVS)] = 1.0e-4f;
+    odom->P[ODOM_IDX(ODOM_IBGZ, ODOM_IBGZ)] = 1.0e-4f;
+    odom->P[ODOM_IDX(ODOM_IBAX, ODOM_IBAX)] = 4.0e-4f;
+    odom->P[ODOM_IDX(ODOM_IBAY, ODOM_IBAY)] = 4.0e-4f;
+
+    odom->static_count = 0U;
+    odom->ready = 1U;
+}
+
+void imu_odom_reset(imu_odom_t *odom)
+{
+    if (odom == NULL) {
+        return;
+    }
+
+    odom->x = 0.0f;
+    odom->y = 0.0f;
+    odom->yaw = 0.0f;
+    odom->v_forward = 0.0f;
+    odom->v_lateral = 0.0f;
+    odom->v_world_x = 0.0f;
+    odom->v_world_y = 0.0f;
+    odom->speed = 0.0f;
+    odom->distance = 0.0f;
+    odom->static_count = 0U;
+    odom->ecd_ready = 0U;
+}
+
+void imu_odom_update(imu_odom_t *odom,
+                     const float accel_body[3],
+                     const float gyro_body[3],
+                     float roll_deg,
+                     float pitch_deg,
+                     int16_t wheel_right_rpm,
+                     int16_t wheel_left_rpm,
+                     uint16_t wheel_right_ecd,
+                     uint16_t wheel_left_ecd,
+                     float dt_s)
+{
+    float s[ODOM_DIM];
+    float accel_norm;
+    float gyro_norm;
+    float wheel_norm;
+    float yaw_rate_body;
+    float psi_dot;
+    float a_f;
+    float a_s;
+    float r00;
+    float r01;
+    float r02;
+    float r10;
+    float r11;
+    float r12;
+    uint8_t frozen;
+
+    if ((odom == NULL) || (accel_body == NULL) || (gyro_body == NULL)
+        || (odom->ready == 0U)) {
+        return;
+    }
+    if ((dt_s < ODOM_DT_MIN_S) || (dt_s > ODOM_DT_MAX_S)) {
+        return;
+    }
+
+    /* ---------- 1. 轮速换算：电机轴 rpm -> 车轮线速度（前进为正） ---------- */
+    odom->wheel_left_mps = ODOM_LEFT_WHEEL_RPM_SIGN
+                         * ODOM_RPM_TO_MPS
+                         * (float)wheel_left_rpm;
+    odom->wheel_right_mps = ODOM_RIGHT_WHEEL_RPM_SIGN
+                          * ODOM_RPM_TO_MPS
+                          * (float)wheel_right_rpm;
+
+    /* ---------- 2. 姿态与角速度输入（EKF 已把 IMU 轴映射到车体系） ---------- */
+    const float roll = DEG_TO_RAD(roll_deg);
+    const float pitch = DEG_TO_RAD(pitch_deg);
+    const float sr = sinf(roll);
+    const float cr = cosf(roll);
+    const float sp = sinf(pitch);
+    const float cp = cosf(pitch);
+
+    /* ZYX 欧拉角速率关系；pitch 接近 ±90° 时退化，轮腿/平衡底盘不会到这 */
+    if (fabsf(cp) > 0.3f) {
+        yaw_rate_body = (gyro_body[1] * sr + gyro_body[2] * cr) / cp;
+    } else {
+        yaw_rate_body = gyro_body[2];
+    }
+
+    /* ---------- 3. 载入状态 ---------- */
+    s[ODOM_IX] = odom->x;
+    s[ODOM_IY] = odom->y;
+    s[ODOM_IPSI] = odom->yaw;
+    s[ODOM_IVF] = odom->v_forward;
+    s[ODOM_IVS] = odom->v_lateral;
+    s[ODOM_IBGZ] = odom->bgz;
+    s[ODOM_IBAX] = odom->bax;
+    s[ODOM_IBAY] = odom->bay;
+
+    /* ---------- 4. 比力投影到水平面（车体系 -> 航向系） ---------- */
+    const float ax_b = accel_body[0] - s[ODOM_IBAX];
+    const float ay_b = accel_body[1] - s[ODOM_IBAY];
+    const float az_b = accel_body[2];
+
+    /* Ry(pitch)·Rx(roll) 的前两行 */
+    r00 = cp;
+    r01 = sp * sr;
+    r02 = sp * cr;
+    r10 = 0.0f;
+    r11 = cr;
+    r12 = -sr;
+
+    a_f = (r00 * ax_b) + (r01 * ay_b) + (r02 * az_b);
+    a_s = (r10 * ax_b) + (r11 * ay_b) + (r12 * az_b);
+
+    if (!isfinite(a_f) || !isfinite(a_s) || !isfinite(yaw_rate_body)) {
+        return;
+    }
+
+    /* ---------- 5. 静止检测（只依赖原始 IMU 与轮速） ---------- */
+    accel_norm = sqrtf(SQUARE(accel_body[0])
+                     + SQUARE(accel_body[1])
+                     + SQUARE(accel_body[2]));
+    gyro_norm = sqrtf(SQUARE(gyro_body[0])
+                    + SQUARE(gyro_body[1])
+                    + SQUARE(gyro_body[2]));
+    wheel_norm = fmaxf(fabsf(odom->wheel_left_mps), fabsf(odom->wheel_right_mps));
+
+    if ((fabsf(accel_norm - ODOM_G_MS2) < ODOM_STATIC_ACCEL_TOL)
+        && (gyro_norm < ODOM_STATIC_GYRO_TOL)
+        && (wheel_norm < ODOM_STATIC_WHEEL_TOL)) {
+        if (odom->static_count < ODOM_STATIC_COUNT) {
+            odom->static_count++;
+        }
+    } else {
+        odom->static_count = 0U;
+    }
+
+    frozen = (((odom->static_count >= ODOM_STATIC_COUNT)
+               && (ODOM_STATIC_FREEZE != 0)) ? 1U : 0U);
+
+    /* ---------- 5b. 里程：左右轮编码器增量累计（零滞后） ----------
+     * 与开源轮腿方案一致：距离直接由 ecd 增量累计，不经过滤波速度，
+     * 避免 rpm 滤波 / 卡尔曼收敛带来的滞后（短距离会少算）。
+     * 车体前进位移 = 两轮位移平均；取"路程"所以累加绝对值。
+     * 静止冻结时不累加（轮子实际也没转，增量为 0，此判断只是兜底）。 */
+    if (odom->ecd_ready == 0U) {
+        odom->last_ecd_left = wheel_left_ecd;
+        odom->last_ecd_right = wheel_right_ecd;
+        odom->ecd_ready = 1U;
+    } else {
+        int32_t d_l = (int32_t)wheel_left_ecd - (int32_t)odom->last_ecd_left;
+        int32_t d_r = (int32_t)wheel_right_ecd - (int32_t)odom->last_ecd_right;
+
+        odom->last_ecd_left = wheel_left_ecd;
+        odom->last_ecd_right = wheel_right_ecd;
+
+        /* 13 位编码器回绕展开（0~8191） */
+        if (d_l > 4096) {
+            d_l -= 8192;
+        } else if (d_l < -4096) {
+            d_l += 8192;
+        }
+        if (d_r > 4096) {
+            d_r -= 8192;
+        } else if (d_r < -4096) {
+            d_r += 8192;
+        }
+
+        if (frozen == 0U) {
+            const float dist_l = ODOM_LEFT_WHEEL_RPM_SIGN
+                               * (float)d_l * ODOM_M_PER_ECD_COUNT;
+            const float dist_r = ODOM_RIGHT_WHEEL_RPM_SIGN
+                               * (float)d_r * ODOM_M_PER_ECD_COUNT;
+            odom->distance += fabsf(0.5f * (dist_l + dist_r));
+        }
+    }
+
+    /* ---------- 6. 预测 ---------- */
+    const float psi_old = s[ODOM_IPSI];
+    float vf_old = s[ODOM_IVF];
+    float vs_old = s[ODOM_IVS];
+    const float c_psi = cosf(psi_old);
+    const float s_psi = sinf(psi_old);
+
+    if (frozen != 0U) {
+        /* 静止冻结：车没动，位置/航向不积分；速度也按静止模型置 0 */
+        psi_dot = 0.0f;
+        vf_old = 0.0f;
+        vs_old = 0.0f;
+        s[ODOM_IVF] = 0.0f;
+        s[ODOM_IVS] = 0.0f;
+    } else {
+        psi_dot = yaw_rate_body - s[ODOM_IBGZ];
+        s[ODOM_IX] += (vf_old * c_psi - vs_old * s_psi) * dt_s;
+        s[ODOM_IY] += (vf_old * s_psi + vs_old * c_psi) * dt_s;
+        s[ODOM_IPSI] = odom_wrap_pi(psi_old + (psi_dot * dt_s));
+        s[ODOM_IVF] = vf_old + ((a_f + (psi_dot * vs_old)) * dt_s);
+        s[ODOM_IVS] = vs_old + ((a_s - (psi_dot * vf_old)) * dt_s);
+    }
+
+    /* ---------- 7. 协方差预测：P = Φ·P·Φᵀ + Q ---------- */
+    float *phi = odom->w_a;
+    memset(phi, 0, sizeof(float) * ODOM_DIM * ODOM_DIM);
+    for (uint32_t i = 0U; i < ODOM_DIM; ++i) {
+        phi[ODOM_IDX(i, i)] = 1.0f;
+    }
+
+    if (frozen == 0U) {
+        /* Φ = I + F·dt，F 的非零元素见文件头连续模型 */
+        phi[ODOM_IDX(ODOM_IX, ODOM_IPSI)] += -(vf_old * s_psi + vs_old * c_psi) * dt_s;
+        phi[ODOM_IDX(ODOM_IX, ODOM_IVF)] += c_psi * dt_s;
+        phi[ODOM_IDX(ODOM_IX, ODOM_IVS)] += -s_psi * dt_s;
+
+        phi[ODOM_IDX(ODOM_IY, ODOM_IPSI)] += (vf_old * c_psi - vs_old * s_psi) * dt_s;
+        phi[ODOM_IDX(ODOM_IY, ODOM_IVF)] += s_psi * dt_s;
+        phi[ODOM_IDX(ODOM_IY, ODOM_IVS)] += c_psi * dt_s;
+
+        phi[ODOM_IDX(ODOM_IPSI, ODOM_IBGZ)] += -dt_s;
+
+        phi[ODOM_IDX(ODOM_IVF, ODOM_IVS)] += psi_dot * dt_s;
+        phi[ODOM_IDX(ODOM_IVF, ODOM_IBGZ)] += -vs_old * dt_s;
+        phi[ODOM_IDX(ODOM_IVF, ODOM_IBAX)] += -r00 * dt_s;
+        phi[ODOM_IDX(ODOM_IVF, ODOM_IBAY)] += -r01 * dt_s;
+
+        phi[ODOM_IDX(ODOM_IVS, ODOM_IVF)] += -psi_dot * dt_s;
+        phi[ODOM_IDX(ODOM_IVS, ODOM_IBGZ)] += vf_old * dt_s;
+        phi[ODOM_IDX(ODOM_IVS, ODOM_IBAX)] += -r10 * dt_s;
+        phi[ODOM_IDX(ODOM_IVS, ODOM_IBAY)] += -r11 * dt_s;
+    }
+
+    odom_mat_mul(phi, odom->P, odom->w_b, ODOM_DIM);
+    odom_mat_mul_bt(odom->w_b, phi, odom->w_c, ODOM_DIM);
+    memcpy(odom->P, odom->w_c, sizeof(float) * ODOM_DIM * ODOM_DIM);
+
+    odom->P[ODOM_IDX(ODOM_IX, ODOM_IX)] += ODOM_Q_POS * dt_s;
+    odom->P[ODOM_IDX(ODOM_IY, ODOM_IY)] += ODOM_Q_POS * dt_s;
+    odom->P[ODOM_IDX(ODOM_IPSI, ODOM_IPSI)] += ODOM_Q_YAW_RATE * dt_s;
+    odom->P[ODOM_IDX(ODOM_IVF, ODOM_IVF)] += ODOM_Q_ACCEL * dt_s;
+    odom->P[ODOM_IDX(ODOM_IVS, ODOM_IVS)] += ODOM_Q_ACCEL * dt_s;
+    odom->P[ODOM_IDX(ODOM_IBGZ, ODOM_IBGZ)] += ODOM_Q_BGZ * dt_s;
+    odom->P[ODOM_IDX(ODOM_IBAX, ODOM_IBAX)] += ODOM_Q_BA * dt_s;
+    odom->P[ODOM_IDX(ODOM_IBAY, ODOM_IBAY)] += ODOM_Q_BA * dt_s;
+    odom_symmetrize(odom->P, ODOM_DIM);
+
+    /* ---------- 8. 观测 ---------- */
+    if (frozen != 0U) {
+        /* 静止：不碰轮速，只用 ZUPT/ZARU（不修改姿态角、不估加计零偏） */
+        odom_static_observations(odom, s, yaw_rate_body);
+    } else {
+        /* 运动：轮速 + 侧向约束 */
+        odom_wheel_observation(odom, s, yaw_rate_body);
+        odom_lateral_observation(odom, s);
+
+#if (ODOM_STATIC_FREEZE == 0)
+        /* 兼容旧行为：静止但未冻结时，轮速观测之后追加 ZUPT / ZARU */
+        if (odom->static_count >= ODOM_STATIC_COUNT) {
+            odom_static_observations(odom, s, yaw_rate_body);
+        }
+#endif
+    }
+
+    /* ---------- 9. 零偏限幅 + 写回对外状态 ---------- */
+    s[ODOM_IBGZ] = CLAMP(s[ODOM_IBGZ], -0.5f, 0.5f);
+    s[ODOM_IBAX] = CLAMP(s[ODOM_IBAX], -2.0f, 2.0f);
+    s[ODOM_IBAY] = CLAMP(s[ODOM_IBAY], -2.0f, 2.0f);
+
+    if (!isfinite(s[ODOM_IX]) || !isfinite(s[ODOM_IY])
+        || !isfinite(s[ODOM_IPSI]) || !isfinite(s[ODOM_IVF])
+        || !isfinite(s[ODOM_IVS])) {
+        imu_odom_reset(odom);
+        return;
+    }
+
+    odom->x = s[ODOM_IX];
+    odom->y = s[ODOM_IY];
+    odom->yaw = odom_wrap_pi(s[ODOM_IPSI]);
+    odom->v_forward = s[ODOM_IVF];
+    odom->v_lateral = s[ODOM_IVS];
+    odom->bgz = s[ODOM_IBGZ];
+    odom->bax = s[ODOM_IBAX];
+    odom->bay = s[ODOM_IBAY];
+
+    const float c_yaw = cosf(odom->yaw);
+    const float s_yaw = sinf(odom->yaw);
+    odom->v_world_x = (odom->v_forward * c_yaw) - (odom->v_lateral * s_yaw);
+    odom->v_world_y = (odom->v_forward * s_yaw) + (odom->v_lateral * c_yaw);
+
+    /* ---------- 10. 输出速度大小（里程已在第 5b 节用编码器累计） ---------- */
+    odom->speed = sqrtf((odom->v_forward * odom->v_forward)
+                      + (odom->v_lateral * odom->v_lateral));
+}

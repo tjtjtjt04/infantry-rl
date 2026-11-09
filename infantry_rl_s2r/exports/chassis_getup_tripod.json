@@ -1,7 +1,7 @@
 {
-  "checkpoint": "logs\\rsl_rl\\infantry_rl_squat_torque\\2026-11-06_18-14-27_chassis_squat_joint_100hz_dr3\\model_2596.pt",
-  "iteration": 2596,
-  "onnx": "exports\\chassis_squat_torque.onnx",
+  "checkpoint": "checkpoints\\getup_tripod_model_2895.pt",
+  "iteration": 2895,
+  "onnx": "exports\\chassis_getup_tripod.onnx",
   "obs_dim": 125,
   "action_dim": 6,
   "history_length": 5,
@@ -69,7 +69,7 @@
         13,
         19
       ],
-      "scale": 0.1
+      "scale": 0.05
     },
     {
       "name": "last_action",
@@ -101,6 +101,6 @@
   "control_rate_hz": 100.0,
   "obs_scales": {
     "base_ang_vel": 0.25,
-    "joint_vel_hips_wheels": 0.1
+    "joint_vel_hips_wheels": 0.05
   }
 }

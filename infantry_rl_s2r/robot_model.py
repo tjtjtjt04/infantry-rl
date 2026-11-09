@@ -15,6 +15,7 @@ The kinematics package is imported read-only: this file never writes to it.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -323,3 +324,105 @@ class FiveBarModel:
             sl = SIDE_SLICE[side]
             cols.append(self.leg_state(side, hips[:, sl.start], knees[:, sl.start]))
         return torch.cat(cols, dim=-1)
+
+
+# --------------------------------------------------------------------------- #
+# Fallen-pose ground contact geometry (measured, not guessed)
+# --------------------------------------------------------------------------- #
+#: Root height (m) at first ground contact vs ``|root pitch|`` (deg) for the locked
+#: squat stance, measured by ``tools/probe_fallen_geometry.py`` with a 2 mm
+#: lowering test against the real ``chassis-rl`` collision meshes.  A bounding box
+#: is not accurate here: the leg links' local bounds are conservative and the
+#: wheels are discs.
+#:
+#: Shape of the curve (this is what the fall-recovery task is built around):
+#:
+#: * 0-17 deg  -> the **wheels** touch first, and the height *decreases* as the
+#:   robot tilts, because the root sits 1.8 cm above the wheel axle;
+#: * 17-20 deg -> the chassis corner joins the two wheels: the "tripod" that the
+#:   balance task's 0.24 rad pitch limit exists to stop just before;
+#: * >=20 deg  -> **only** the chassis corner touches and the wheels are in the air
+#:   (4.8 cm at 35 deg).  That pose is unstable: the CoM projects behind the corner,
+#:   so gravity rotates the robot back down -- 30-40 deg is a *transient*, not a
+#:   resting state.
+FALLEN_CONTACT_TABLE: tuple[tuple[float, float], ...] = (
+    (0.0, 0.1720),
+    (5.0, 0.1720),
+    (10.0, 0.1700),
+    (15.0, 0.1680),
+    (17.0, 0.1660),
+    (20.0, 0.1720),
+    (25.0, 0.1900),
+    (30.0, 0.2060),
+    (35.0, 0.2200),
+    (40.0, 0.2360),
+    (45.0, 0.2480),
+    (60.0, 0.2700),
+    (90.0, 0.3000),
+)
+
+#: measured file written by ``tools/probe_fallen_geometry.py``; overrides the table
+FALLEN_GEOMETRY_PATH: Path = CONFIG_DIR / "fallen_geometry.json"
+
+
+def _fallen_table() -> tuple[tuple[float, float], ...]:
+    """``FALLEN_CONTACT_TABLE``, replaced by the measured JSON when it is present."""
+    path = FALLEN_GEOMETRY_PATH
+    if not path.is_file():
+        return FALLEN_CONTACT_TABLE
+    try:
+        rows = json.loads(path.read_text(encoding="utf-8")).get("rows", [])
+        table = sorted(
+            (float(r["pitch_deg"]), float(r["contact_height"]))
+            for r in rows
+            if r.get("contact_height") is not None and math.isfinite(float(r["contact_height"]))
+        )
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(f"[robot_model] WARNING: could not read {path} ({exc}); using the built-in table")
+        return FALLEN_CONTACT_TABLE
+    if len(table) < 3:
+        return FALLEN_CONTACT_TABLE
+    if table[0][0] > 0.0:
+        table.insert(0, (0.0, table[0][1]))
+    return tuple(table)
+
+
+@lru_cache(maxsize=1)
+def fallen_geometry() -> dict:
+    """Ground-contact geometry of the retracted-leg stance.
+
+    Returns a dict with
+
+    * ``table`` -- ``[(pitch_deg, contact_height_m), ...]`` (absolute ``|pitch|``);
+    * ``contact_height`` -- callable ``pitch_rad (float or tensor) -> height_m``,
+      linear between the measured samples and clamped outside them;
+    * ``source`` -- the JSON that was used, or ``None`` for the built-in table.
+
+    The height is the root ``z`` at which the *lowest* collision geometry first
+    touches ``z = 0``.  Callers add their own margin so the robot never starts
+    inside the ground.
+    """
+    table = _fallen_table()
+    angles = torch.tensor([p for p, _ in table], dtype=torch.float64)
+    heights = torch.tensor([z for _, z in table], dtype=torch.float64)
+
+    def contact_height(pitch):
+        if isinstance(pitch, torch.Tensor):
+            deg = pitch.abs() * (180.0 / math.pi)
+            deg = deg.clamp(float(angles[0]), float(angles[-1]))
+            a = angles.to(deg.device)
+            h = heights.to(deg.device)
+            idx = torch.searchsorted(a, deg, right=True).clamp(1, a.numel() - 1)
+            a0, a1 = a[idx - 1], a[idx]
+            h0, h1 = h[idx - 1], h[idx]
+            return (h0 + (h1 - h0) * (deg - a0) / (a1 - a0)).to(torch.float32)
+        deg = min(max(math.degrees(abs(float(pitch))), float(angles[0])), float(angles[-1]))
+        for i in range(1, angles.numel()):
+            a0, a1 = float(angles[i - 1]), float(angles[i])
+            if deg <= a1:
+                h0, h1 = float(heights[i - 1]), float(heights[i])
+                return h0 + (h1 - h0) * (deg - a0) / (a1 - a0)
+        return float(heights[-1])
+
+    source = str(FALLEN_GEOMETRY_PATH) if FALLEN_GEOMETRY_PATH.is_file() else None
+    return {"table": table, "contact_height": contact_height, "source": source}

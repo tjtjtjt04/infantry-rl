@@ -1,0 +1,223 @@
+#ifndef IMU_ODOM_H
+#define IMU_ODOM_H
+
+#include <stdint.h>
+
+#include "bmi088_noise.h"   /* BMI088 六面标定实测噪声 σ（已知噪声的唯一来源） */
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ==========================================================================
+ * imu_odom —— 轮式里程计（EKF，8 状态）
+ * ==========================================================================
+ * 结构：折中式 EKF。roll / pitch 直接取姿态 EKF（ekf.c）的输出，本模块只估计
+ *
+ *      x = [ X, Y, psi, v_f, v_s, b_gz, b_ax, b_ay ]
+ *
+ *   X, Y        世界系平面位置                    (m)
+ *   psi         航向角                             (rad)，范围 (-pi, pi]
+ *   v_f, v_s    沿航向 / 垂直航向的地面速度        (m/s)
+ *   b_gz        陀螺 Z 轴零偏                      (rad/s)
+ *   b_ax, b_ay  加计 X / Y 轴零偏（机体系）        (m/s²)
+ *
+ * 主要输出：
+ *   - distance：累计路程 (m) = ∫|v|dt，静止冻结时不增长（这是"实际走过的距离"）；
+ *   - speed：当前地面速度大小 (m/s)；
+ *   - x / y 只是内部积分状态，长期会漂，不建议直接当坐标使用。
+ *
+ * 预测（每个调用周期一次）：
+ *   - 用 EKF 的 accel / gyro（ekf.c 里已换算到车体系 X 前 / Y 左 / Z 上，
+ *     加速度含重力，单位 m/s²）做机械编排；
+ *   - 用 roll / pitch 把比力投影到水平面，得到沿航向的加速度；
+ *   - 航向角速度按 ZYX 欧拉角速率关系
+ *         psi_dot = (w_y * sin(roll) + w_z * cos(roll)) / cos(pitch) - b_gz
+ *     积分（平衡/轮腿底盘 pitch 较大，不用 w_z 直接近似）。
+ *
+ * 观测（运动时）：
+ *   1) 左右轮速：z = [ (v_L + v_R) / 2 , (v_R - v_L) / b ]
+ *        —— 前向速度 + 偏航角速度，后者直接观测陀螺 Z 零偏；
+ *   2) 侧向零速约束：差速 / 轮腿底盘不能侧移，v_s ~= 0。
+ *
+ * 静止时（连续 ODOM_STATIC_COUNT 次满足"加速度模长约 g、角速度小、轮速小"）：
+ *   - ODOM_STATIC_FREEZE = 1（默认）：冻结位移与航向——位置/航向不积分，速度置 0，
+ *     并跳过轮速观测（轮速零偏不会被积成位移）；只保留 ZUPT/ZARU 收紧速度方差、
+ *     学习陀螺 Z 零偏，不修改姿态角。
+ *   - ODOM_STATIC_FREEZE = 0：退回旧行为（始终用轮速观测，静止时追加 ZUPT/ZARU）。
+ *
+ * 代价：静止门限（轮速 < 3 cm/s）内缓慢蠕动不会被积分，属于有意的取舍。
+ *
+ * 相对文本文档（15 维 ESKF）的差别：姿态不重复估计，roll/pitch 用 EKF，
+ * 因此状态是 8 维而不是 15 维。轮子标定参数集中在下面一组宏里。
+ *
+ * 本模块只做里程计，不修改 EKF，也不依赖任何任务。后续接入 1 kHz 控制周期时
+ * 只需（示例，当前未写入任务）：
+ *
+ *     imu_odom_update(&ODOM,
+ *                     EKF.accel, EKF.gyro, EKF.roll, EKF.pitch,
+ *                     DJI_M1_MEASURE.speed_rpm,   // 右轮 0x201 转速
+ *                     DJI_M2_MEASURE.speed_rpm,   // 左轮 0x202 转速
+ *                     DJI_M1_MEASURE.ecd,         // 右轮编码器（里程）
+ *                     DJI_M2_MEASURE.ecd,         // 左轮编码器（里程）
+ *                     dt_s);
+ *
+ * 注意：模块为单实例设计（与 ekf.c 的 EKF 同风格），工作区放在句柄内部，
+ * 避免在任务栈上分配大数组。
+ * ========================================================================== */
+
+/* ==================== 轮子标定参数（换车 / 换轮只改这里） ==================== */
+#define ODOM_WHEEL_RADIUS_M       (0.070f)      /* 轮半径：70 mm（实测，注意不是直径） */
+#define ODOM_TRACK_WIDTH_M        (0.44289f)    /* 轮距：左右轮到旋转中心 221.445 mm */
+#define ODOM_GEAR_RATIO           (19.203208f)  /* DJI 3508 减速比 3591/187 */
+#define ODOM_RIGHT_WHEEL_RPM_SIGN (-1.0f)       /* M1(0x201) 右轮：转速为负时车前进 */
+#define ODOM_LEFT_WHEEL_RPM_SIGN  (+1.0f)       /* M2(0x202) 左轮：转速为正时车前进 */
+
+/* 里程标定系数：跑一段已知距离（如 2 m），填 实际距离/显示距离；1.0 = 不修正。
+ * 用来吸收轮胎压缩、轮径公差、附加传动比等难以单独测量的比例误差。 */
+#define ODOM_WHEEL_CAL_SCALE      (1.0f)
+#define ODOM_WHEEL_EFF_RADIUS_M   (ODOM_WHEEL_RADIUS_M * ODOM_WHEEL_CAL_SCALE)
+
+/* 电机轴转速 rpm -> 车轮线速度 m/s：v = 2*pi*r_eff*n / (60*i) */
+#define ODOM_RPM_TO_MPS \
+    ((6.283185307179586f * ODOM_WHEEL_EFF_RADIUS_M) / (60.0f * ODOM_GEAR_RATIO))
+
+/* 编码器换算：DJI 3508/C620 反馈的机械角为转子侧 0~8191，即每转 8192 个计数。
+ * 一个计数对应的车轮地面位移 = 2*pi*r_eff / (8192*i) ≈ 2.8 µm（r=70 mm、i=19.203）。
+ * 累计位移用编码器增量（零滞后），速度用 rpm（进滤波器），与开源轮腿方案一致。 */
+#define ODOM_ECD_PER_REV      (8192.0f)
+#define ODOM_M_PER_ECD_COUNT \
+    ((6.283185307179586f * ODOM_WHEEL_EFF_RADIUS_M) \
+     / (ODOM_ECD_PER_REV * ODOM_GEAR_RATIO))
+
+/* ==================== 观测噪声（按实车调） ==================== */
+#define ODOM_R_WHEEL_MPS      (0.05f)   /* 轮速（平均速度）观测噪声 (m/s) */
+#define ODOM_R_WHEEL_YAW_RPS  (0.05f)   /* 轮速差 -> 偏航角速度噪声 (rad/s) */
+#define ODOM_R_LATERAL_MPS    (0.30f)   /* 侧向零速约束噪声 (m/s)，越大越弱 */
+#define ODOM_R_ZUPT_MPS       (0.02f)   /* ZUPT 噪声 (m/s) */
+#define ODOM_R_ZARU_RPS       (0.02f)   /* ZARU 噪声 (rad/s) */
+
+/* ==================== 过程噪声强度（乘 dt 使用） ====================
+ * 已知部分：陀螺/加计白噪声直接取 BMI088 六面标定实测值（bmi088_noise.h）。
+ * 未知部分：零偏随机游走、位置噪声仍是工程值（需要 Allan 方差/实测标定）。 */
+#define ODOM_IMU_VIBRATION_MARGIN (2.0f)  /* 实车振动/腿运动余量倍数（未知，可调） */
+
+/* 陀螺 Z 白噪声方差：实测 σ_z = 0.005555 rad/s -> 3.09e-5 (rad/s)²
+ * （原工程值 4e-6 明显偏小，会让滤波器对航向过于自信） */
+#define ODOM_Q_YAW_RATE \
+    (BMI088_GYRO_NOISE_Z * BMI088_GYRO_NOISE_Z)
+
+/* 加计水平白噪声方差：取 X/Y 中较大者 σ_y = 0.034774 m/s²，再乘振动余量
+ * -> (2 × 0.034774)² ≈ 4.84e-3 (m/s²)² */
+#define ODOM_IMU_ACC_NOISE_H (BMI088_ACC_NOISE_Y)
+#define ODOM_Q_ACCEL \
+    (((ODOM_IMU_VIBRATION_MARGIN * ODOM_IMU_ACC_NOISE_H) * \
+      (ODOM_IMU_VIBRATION_MARGIN * ODOM_IMU_ACC_NOISE_H)))
+
+#define ODOM_Q_POS            (1.0e-12f) /* 位置 (m²/s)，纯工程值 */
+#define ODOM_Q_BGZ            (1.0e-10f) /* 陀螺零偏 (rad/s)²/s，近似冻结 */
+#define ODOM_Q_BA             (1.0e-10f) /* 加计零偏 (m/s²)²/s，近似冻结 */
+
+/* ==================== 静止检测门限 ==================== */
+#define ODOM_STATIC_ACCEL_TOL (0.50f)  /* | |a| - g | 小于该值 (m/s²) */
+#define ODOM_STATIC_GYRO_TOL  (0.05f)  /* 角速度模长小于该值 (rad/s) */
+#define ODOM_STATIC_WHEEL_TOL (0.03f)  /* 轮速绝对值小于该值 (m/s) */
+#define ODOM_STATIC_COUNT     (100U)   /* 连续 100 次（1 kHz 下 100 ms）触发 */
+
+/* ==================== 静止处理策略 ==================== */
+#define ODOM_STATIC_FREEZE        (1)     /* 1 = 静止时冻结位移/航向并跳过轮速观测 */
+
+/* ==================== 其他常量 ==================== */
+#define ODOM_DIM              (8U)
+#define ODOM_DT_MIN_S         (1.0e-4f)  /* 允许的最小采样间隔 (s) */
+#define ODOM_DT_MAX_S         (5.0e-2f)  /* 允许的最大采样间隔 (s) */
+
+/** 里程计句柄：对外输出 + 滤波内部状态 + 预分配工作区 */
+typedef struct
+{
+    /* ---------- 对外输出：世界系平面里程计 ---------- */
+    float x;          /**< 世界系 X 位置 (m) */
+    float y;          /**< 世界系 Y 位置 (m) */
+    float yaw;        /**< 航向角 (rad)，范围 (-pi, pi] */
+    float v_forward;  /**< 沿航向的地面速度 (m/s) */
+    float v_lateral;  /**< 垂直航向的地面速度 (m/s) */
+    float v_world_x;  /**< 世界系 X 速度 (m/s) */
+    float v_world_y;  /**< 世界系 Y 速度 (m/s) */
+
+    /* ---------- 主要输出：里程 ---------- */
+    float speed;      /**< 当前地面速度大小 (m/s) = |[v_f, v_s]|（来自滤波） */
+    float distance;   /**< 累计路程 (m)：左右轮编码器增量累计，零滞后；静止不变 */
+
+    /* ---------- 估计出的传感器零偏 ---------- */
+    float bgz;        /**< 陀螺 Z 轴零偏 (rad/s) */
+    float bax;        /**< 加计 X 轴零偏 (m/s²) */
+    float bay;        /**< 加计 Y 轴零偏 (m/s²) */
+
+    /* ---------- 轮速（换算后的车轮线速度，调试用） ---------- */
+    float wheel_left_mps;   /**< 左轮线速度 (m/s)，前进为正 */
+    float wheel_right_mps;  /**< 右轮线速度 (m/s)，前进为正 */
+
+    /* ---------- 滤波内部 ---------- */
+    float P[ODOM_DIM * ODOM_DIM];  /**< 状态协方差 */
+    uint16_t static_count;         /**< 连续静止计数（ZUPT 门控） */
+    uint16_t last_ecd_left;        /**< 上一次左轮编码器值（里程累计用） */
+    uint16_t last_ecd_right;       /**< 上一次右轮编码器值 */
+    uint8_t ecd_ready;             /**< 编码器基准是否已建立 */
+    uint8_t ready;                 /**< 初始化完成标志 */
+
+    /* ---------- 预分配工作区（避免占用任务栈） ---------- */
+    float w_a[ODOM_DIM * ODOM_DIM];
+    float w_b[ODOM_DIM * ODOM_DIM];
+    float w_c[ODOM_DIM * ODOM_DIM];
+    float w_pht[ODOM_DIM * 2U];
+    float w_k[ODOM_DIM * 2U];
+} imu_odom_t;
+
+/**
+ * @brief 初始化里程计：状态清零、协方差置初值。
+ * @param odom 待初始化句柄（为空时直接返回）。
+ */
+void imu_odom_init(imu_odom_t *odom);
+
+/**
+ * @brief 复位位姿：位置、航向、速度、静止计数清零；协方差与零偏保留。
+ *
+ * 用于比赛中重新对准场地原点、或长时间静止后重新出发。
+ *
+ * @param odom 已初始化的句柄。
+ */
+void imu_odom_reset(imu_odom_t *odom);
+
+/**
+ * @brief 单步更新里程计（建议 1 kHz，在固定周期任务里调用）。
+ *
+ * @param odom           已初始化的句柄。
+ * @param accel_body     车体系加速度，含重力（m/s²），即 EKF.accel。
+ * @param gyro_body      车体系角速度（rad/s），即 EKF.gyro。
+ * @param roll_deg       姿态 EKF 的 roll（deg），即 EKF.roll。
+ * @param pitch_deg      姿态 EKF 的 pitch（deg），即 EKF.pitch。
+ * @param wheel_right_rpm 右轮原始转速（DJI_M1_MEASURE.speed_rpm，0x201）。
+ * @param wheel_left_rpm  左轮原始转速（DJI_M2_MEASURE.speed_rpm，0x202）。
+ * @param wheel_right_ecd 右轮编码器机械角（DJI_M1_MEASURE.ecd，0x201，0~8191）。
+ * @param wheel_left_ecd  左轮编码器机械角（DJI_M2_MEASURE.ecd，0x202，0~8191）。
+ * @param dt_s           本次采样间隔（s），建议用 DWT 实测值。
+ */
+void imu_odom_update(imu_odom_t *odom,
+                     const float accel_body[3],
+                     const float gyro_body[3],
+                     float roll_deg,
+                     float pitch_deg,
+                     int16_t wheel_right_rpm,
+                     int16_t wheel_left_rpm,
+                     uint16_t wheel_right_ecd,
+                     uint16_t wheel_left_ecd,
+                     float dt_s);
+
+/** 全局里程计句柄（单实例；未初始化前 ready = 0，update 直接返回） */
+extern imu_odom_t ODOM;
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* IMU_ODOM_H */

@@ -249,7 +249,7 @@ def main() -> int:
             {"name": "projected_gravity", "slice": [3, 6], "scale": 1.0},
             {"name": "command", "slice": [6, 9], "scale": 1.0},
             {"name": "hip_pos_rel_locked", "slice": [9, 13], "scale": 1.0},
-            {"name": "joint_vel_hips_wheels", "slice": [13, 19], "scale": 0.1},
+            {"name": "joint_vel_hips_wheels", "slice": [13, 19], "scale": 0.05},
             {"name": "last_action", "slice": [19, 25], "scale": 1.0},
         ],
         "action_layout": {
@@ -277,7 +277,7 @@ def main() -> int:
         "control_rate_hz": 100.0,
         "obs_scales": {
             "base_ang_vel": 0.25,
-            "joint_vel_hips_wheels": 0.1,
+            "joint_vel_hips_wheels": 0.05,
         },
     }
     meta_path = output.with_suffix(".json")

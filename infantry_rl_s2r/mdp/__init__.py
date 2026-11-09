@@ -6,8 +6,8 @@ The cfg classes live in the submodules; the terms used by ``env_squat`` and
 
 from . import actions, events, observations, rewards, terminations  # noqa: F401
 from .actions import FiveBarJointAction, FiveBarJointActionCfg  # noqa: F401
-from .events import reset_root_state_standing_squat  # noqa: F401
-from .terminations import pitch_above, roll_above  # noqa: F401
+from .events import reset_root_state_fallen, reset_root_state_standing_squat  # noqa: F401
+from .terminations import pitch_above, roll_above, upright_stable  # noqa: F401
 from .observations import (  # noqa: F401
     heading_error,
     hip_pos_rel_locked,
@@ -38,6 +38,7 @@ from .rewards import (  # noqa: F401
     pitch_abs,
     position_xy_alive,
     position_xy_l2,
+    recovery_success,
     roll_abs,
     wheel_spin_l2,
     yaw_rate_l2,
@@ -51,6 +52,8 @@ __all__ = [
     "terminations",
     "pitch_above",
     "roll_above",
+    "upright_stable",
+    "reset_root_state_fallen",
     "reset_root_state_standing_squat",
     "FiveBarJointAction",
     "FiveBarJointActionCfg",
@@ -76,6 +79,7 @@ __all__ = [
     "position_xy_alive",
     "position_xy_l2",
     "proprio_obs",
+    "recovery_success",
     "roll_abs",
     "wheel_spin_l2",
     "yaw_angle",
