@@ -169,6 +169,10 @@ class ActionsCfg:
         assist_cycle_steps=CURRICULUM_PHASE_STEPS,
         assist_phases=2,
         assist_apply_after_warmup=True,
+        # 鲁棒性：动作延迟 0~2 步（20~40 ms）/ 力矩缩放 ±10% / 力矩一阶低通 20~50 ms
+        action_delay_max=2,
+        torque_scale_range=(0.9, 1.1),
+        torque_lpf_tau_range=(0.02, 0.05),
     )
 
 
@@ -194,6 +198,10 @@ class ActionsCfgStage2:
         settle_hip_kd=10.0,
         # 阶段1 已学会轮平衡，阶段2 不再重新施加辅助
         balance_assist=False,
+        # 鲁棒性：动作延迟 0~2 步（20~40 ms）/ 力矩缩放 ±10% / 力矩一阶低通 20~50 ms
+        action_delay_max=2,
+        torque_scale_range=(0.9, 1.1),
+        torque_lpf_tau_range=(0.02, 0.05),
     )
 
 
@@ -209,11 +217,11 @@ class ObservationsCfg:
         """策略观测（顺序即拼接顺序：ang_vel → gravity → commands → hip_pos_rel → dof_vel → actions）。"""
 
         base_ang_vel = ObsTerm(
-            func=base_mdp.base_ang_vel, scale=0.25, noise=GYRO_NOISE_CFG
-        )  # [0:3] 陀螺仪噪声（rad/s）
+            func=mdp.imu_gyro, scale=0.25, noise=GYRO_NOISE_CFG
+        )  # [0:3] 陀螺仪：零偏随机化 + 噪声
         projected_gravity = ObsTerm(
-            func=base_mdp.projected_gravity, scale=1.0, noise=ACC_NOISE_CFG
-        )  # [3:6] 加速度计噪声 σ = 实测量程噪声/9.81 g
+            func=mdp.imu_gravity, scale=1.0, noise=ACC_NOISE_CFG
+        )  # [3:6] 加速度计：安装倾角偏置 + 噪声
         commands = ObsTerm(func=mdp.commands_obs)  # [6:9] [lin_vel_x, yaw, height_cmd×5]
         hip_pos_rel = ObsTerm(
             func=mdp.hip_pos_rel, params={"asset_cfg": _joint_cfg(HIP_ORDER)}, scale=1.0
@@ -286,7 +294,14 @@ class EventCfg:
         },
     )
 
-    # 5) 高度指令：阶段1 固定在名义高度（不做高度跟踪）
+    # 5) IMU 零偏/安装误差：每个 episode 随机（鲁棒性）
+    reset_sensor_bias = EventTerm(
+        func=mdp.reset_sensor_bias,
+        mode="reset",
+        params={"gyro_bias_range": 0.01, "tilt_bias_deg": 1.0},
+    )
+
+    # 6) 高度指令：阶段1 固定在名义高度（不做高度跟踪）
     reset_height_command = EventTerm(
         func=mdp.reset_height_command,
         mode="reset",
@@ -303,9 +318,9 @@ class EventCfg:
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*wheel.*"),
-            "static_friction_range": (0.6, 1.0),
-            "dynamic_friction_range": (0.6, 1.0),
-            "restitution_range": (0.0, 0.0),
+            "static_friction_range": (0.3, 1.2),
+            "dynamic_friction_range": (0.3, 1.2),
+            "restitution_range": (0.0, 0.05),
             "num_buckets": 32,
             "make_consistent": True,
         },
@@ -332,16 +347,52 @@ class EventCfg:
         },
     )
 
+    # 质心偏移随机化（模拟装配/负载偏心）
+    randomize_base_com = EventTerm(
+        func=base_mdp.randomize_rigid_body_com,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
+            "com_range": {"x": (-0.01, 0.01), "y": (-0.01, 0.01), "z": (-0.005, 0.005)},
+        },
+    )
+
+    # 关节摩擦/电枢随机化（模拟关节阻力与电机惯量差异）
+    randomize_joint_parameters = EventTerm(
+        func=base_mdp.randomize_joint_parameters,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "friction_distribution_params": (0.0, 0.05),
+            "operation": "abs",
+        },
+    )
+
     # ------------------------------- interval（周期性推力，考验平衡鲁棒性） ------------------------------- #
     push_robot = EventTerm(
         func=base_mdp.push_by_setting_velocity,
         mode="interval",
-        interval_range_s=(2.0, 4.0),
+        interval_range_s=(1.5, 3.0),
         params={
             "velocity_range": {
-                "x": (-0.15, 0.15),
-                "y": (-0.15, 0.15),
-                "yaw": (-0.2, 0.2),
+                "x": (-0.25, 0.25),
+                "y": (-0.25, 0.25),
+                "yaw": (-0.3, 0.3),
+            },
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+
+    # 更强的偶发冲击（模拟真机磕碰/外力）
+    push_robot_strong = EventTerm(
+        func=base_mdp.push_by_setting_velocity,
+        mode="interval",
+        interval_range_s=(6.0, 10.0),
+        params={
+            "velocity_range": {
+                "x": (-0.45, 0.45),
+                "y": (-0.45, 0.45),
+                "yaw": (-0.5, 0.5),
             },
             "asset_cfg": SceneEntityCfg("robot"),
         },
@@ -383,7 +434,7 @@ class EventCfgHeight(EventCfg):
 class RewardsCfg:
     """**阶段1 奖励**：起立 + 平衡（高度跟踪关闭）。"""
 
-    alive = RewTerm(func=mdp.is_alive, weight=0.5)  # 存活
+    alive = RewTerm(func=mdp.is_alive, weight=1.0)  # 存活（提高权重：鼓励活满 1000 步）
     upright = RewTerm(func=mdp.upright, weight=2.0, params={"denom": 0.02})  # 姿态竖直（窄核）
     tilt = RewTerm(func=mdp.tilt_l2, weight=-3.0)  # 倾斜度平方惩罚（全程有梯度）
     pitch_progress = RewTerm(func=mdp.pitch_progress, weight=-1.5)  # 姿态改善过程奖励
@@ -401,7 +452,7 @@ class RewardsCfg:
     torques = RewTerm(func=mdp.torques_l2, weight=-1.0e-4)
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
     dof_pos_limits = RewTerm(func=mdp.dof_pos_limits, weight=-1.0)
-    terminating = RewTerm(func=mdp.is_terminated, weight=-50.0)  # 实际 -1.0/回合
+    terminating = RewTerm(func=mdp.is_terminated, weight=-200.0)  # 摔倒终止惩罚（加大：减少 failed_to_recover）
 
 
 @configclass
@@ -549,3 +600,130 @@ class ChassisStandUpRecoveryEnvCfg(ChassisStandUpEnvCfg):
     actions: ActionsCfgStage2 = ActionsCfgStage2()  # 髋力矩 + 开局 0.4 s 收腿稳定
     events: EventCfgRecovery = EventCfgRecovery()
     # rewards 用基类 RewardsCfg（高度跟踪权重 0），terminations 同基类
+
+
+# --------------------------------------------------------------------------- #
+# 蹲姿训练任务（重新从头训练）：最低腿长 + 髋关节全开放（4 髋力矩参与）
+# --------------------------------------------------------------------------- #
+#: 蹲姿目标高度 = 最低腿长（收腿姿态）对应的 base 高度
+MIN_STANCE_HEIGHT: float = RETRACTED_BASE_HEIGHT  # ≈ 0.171707 m
+
+
+@configclass
+class RewardsCfgSquat(RewardsCfg):
+    """**蹲姿（最低腿长）平衡**奖励：在基类上打开"保持最低高度"跟踪。
+
+    - 目标高度固定为最低腿长（0.1717 m）→ 抑制策略把腿伸高；
+    - 其余存活/竖直/对称/速度/力矩惩罚继承基类。
+    """
+
+    base_height_track = RewTerm(func=mdp.base_height_track, weight=2.0, params={"sigma": 0.001})
+    height_rate = RewTerm(func=mdp.height_rate_l2, weight=-0.05)
+
+
+@configclass
+class EventCfgSquat(EventCfgRecovery):
+    """**蹲姿任务事件**：随机方向倒地 + 髋收到最低腿长 + 高度指令固定在最低高度。"""
+
+    reset_height_command = EventTerm(
+        func=mdp.reset_height_command,
+        mode="reset",
+        params={
+            "height_range": (MIN_STANCE_HEIGHT, MIN_STANCE_HEIGHT),
+            "nominal": MIN_STANCE_HEIGHT,
+            "curriculum_steps": 0,
+            "curriculum_start_steps": 0,
+        },
+    )
+
+
+@configclass
+class ActionsCfgSquat:
+    """**蹲姿任务动作**：6 维全部生效（4 髋力矩 + 2 轮力矩），开局 0.4 s 收腿稳定。
+
+    - 髋关节全开放（纯力矩，策略直接控制 4 个髋）；
+    - 轮上平衡辅助先开后退火（600 iter 内 1→0），帮助从头学起立/平衡。
+    """
+
+    wheel_leg = ChassisWheelLegActionCfg(
+        asset_name="robot",
+        use_hip_actions=True,
+        mask_hip_actions=False,  # 髋全开放
+        hip_control="torque",
+        hip_torque_scale=2.5,
+        lock_hips=False,
+        wheel_control="torque",
+        wheel_torque_scale=1.0,
+        clip_actions=8.0,
+        wheel_unpowered_steps=0,
+        settle_steps=20,
+        settle_hip_positions=list(RETRACTED_HIPS),
+        settle_hip_kp=300.0,
+        settle_hip_kd=10.0,
+        # 轮上平衡辅助：从头训练时"扶着学"，600 iter 内退到 0
+        balance_assist=True,
+        assist_kp=15.0,
+        assist_kd=1.0,
+        assist_scale_start=1.0,
+        assist_scale_end=0.0,
+        assist_anneal_steps=48 * 600,
+        assist_apply_after_warmup=True,
+        # 鲁棒性：动作延迟 0~2 步（20~40 ms）/ 力矩缩放 ±10% / 力矩一阶低通 20~50 ms
+        action_delay_max=2,
+        torque_scale_range=(0.9, 1.1),
+        torque_lpf_tau_range=(0.02, 0.05),
+    )
+
+
+@configclass
+class ChassisStandUpSquatEnvCfg(ChassisStandUpEnvCfg):
+    """**蹲姿任务（从头训练）**：最低腿长 + 髋全开放，训练"倒地起立 + 蹲姿平衡"。
+
+    - 起始：随机方向倒地，髋收到最低腿长（q=0），开局 0.4 s 收腿稳定；
+    - 髋自由（4 髋力矩由策略输出），轮子负责平衡；
+    - 高度指令固定为最低高度（0.1717 m），奖励鼓励保持蹲姿（不伸腿变高）；
+    - 无高度指令变化（不跟踪高度），适合"重新开始蹲姿/起立训练"。
+    """
+
+    scene: SceneCfg = SceneCfg(num_envs=2048, env_spacing=4.0)
+    actions: ActionsCfgSquat = ActionsCfgSquat()
+    events: EventCfgSquat = EventCfgSquat()
+    rewards: RewardsCfgSquat = RewardsCfgSquat()
+
+
+# --------------------------------------------------------------------------- #
+# 课程第一段：固定方向倒地（起立/蹲姿平衡）
+# --------------------------------------------------------------------------- #
+@configclass
+class EventCfgSquatFixed(EventCfgSquat):
+    """课程第一段事件：**始终从同一方向倒地**（默认 +pitch），其余同蹲姿任务。"""
+
+    reset_root = EventTerm(
+        func=mdp.reset_root_fallen_directional,
+        mode="reset",
+        params={
+            "pitch_range": FALLEN_PITCH_RANGE,
+            "phase_steps": 0,
+            "fixed_sign": 1,  # 固定 +pitch 方向倒地；改成 -1 则从反方向开始
+            "x_range": (-0.05, 0.05),
+            "y_range": (-0.05, 0.05),
+            "z_range": (-0.004, 0.004),
+            "roll_range": (-0.05, 0.05),
+            "yaw_range": (-0.1, 0.1),
+            "velocity_range": (-0.05, 0.05),
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+
+
+@configclass
+class ChassisStandUpSquatFixedEnvCfg(ChassisStandUpSquatEnvCfg):
+    """**课程第一段**：固定方向倒地 + 最低腿长 + 髋全开放 → 起立 + 蹲姿平衡。
+
+    三个阶段建议顺序：
+    1. 本任务（固定方向倒地）；
+    2. ``Chassis-Stand-Up-Squat-v0``（随机方向倒地，继续 resume）；
+    3. ``Chassis-Stand-Up-Height-v0``（变腿长/高度跟踪，继续 resume）。
+    """
+
+    events: EventCfgSquatFixed = EventCfgSquatFixed()

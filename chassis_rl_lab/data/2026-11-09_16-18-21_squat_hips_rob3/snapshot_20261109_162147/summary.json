@@ -1,0 +1,679 @@
+{
+  "run_name": "2026-11-09_16-18-21_squat_hips_rob3",
+  "log_dir": "D:\\Robomaster\\RL\\chassis_rl_lab\\logs\\rsl_rl\\chassis_rl_stand_up\\2026-11-09_16-18-21_squat_hips_rob3",
+  "exported_at": "2026-11-09 16:21:49",
+  "data_dir": "D:\\Robomaster\\RL\\chassis_rl_lab\\data\\2026-11-09_16-18-21_squat_hips_rob3\\snapshot_20261109_162147",
+  "num_tags": 71,
+  "tags": {
+    "Episode_Reward/action_rate": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -0.004599583800882101,
+      "last_value": -0.09631466865539551,
+      "min": -0.1486644595861435,
+      "max": -0.004599583800882101
+    },
+    "Episode_Reward/alive": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 0.01504166703671217,
+      "last_value": 0.8812606334686279,
+      "min": 0.01504166703671217,
+      "max": 1.0000133514404297
+    },
+    "Episode_Reward/base_ang_vel_xy": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -0.0002075390366371721,
+      "last_value": -0.027348190546035767,
+      "min": -0.09057911485433578,
+      "max": -0.0002075390366371721
+    },
+    "Episode_Reward/base_height_track": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 0.029947515577077866,
+      "last_value": 1.749849796295166,
+      "min": 0.029947515577077866,
+      "max": 1.9911025762557983
+    },
+    "Episode_Reward/base_lin_vel": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -5.2043986215721816e-05,
+      "last_value": -0.014084063470363617,
+      "min": -0.08470716327428818,
+      "max": -5.2043986215721816e-05
+    },
+    "Episode_Reward/dof_acc": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -0.00033792591420933604,
+      "last_value": -0.05933472141623497,
+      "min": -0.19719700515270233,
+      "max": -0.00033792591420933604
+    },
+    "Episode_Reward/dof_pos_limits": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -9.988406191041577e-08,
+      "last_value": -1.4217015632311814e-05,
+      "min": -3.153942816425115e-05,
+      "max": -9.988406191041577e-08
+    },
+    "Episode_Reward/dof_vel": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -4.2372346797492355e-05,
+      "last_value": -0.010317334905266762,
+      "min": -0.038027580827474594,
+      "max": -4.2372346797492355e-05
+    },
+    "Episode_Reward/height_rate": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -5.666644028679002e-06,
+      "last_value": -1.9324197637615725e-05,
+      "min": -7.192207704065368e-05,
+      "max": -5.666644028679002e-06
+    },
+    "Episode_Reward/hip_symmetry": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -3.319333472973085e-06,
+      "last_value": -0.0002184233453590423,
+      "min": -0.006266708951443434,
+      "max": -3.319333472973085e-06
+    },
+    "Episode_Reward/pitch_progress": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -0.0002722637727856636,
+      "last_value": 0.0009679696522653103,
+      "min": -0.006020526867359877,
+      "max": 0.004237243440002203
+    },
+    "Episode_Reward/terminating": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -0.19999998807907104,
+      "last_value": -0.05416666716337204,
+      "min": -0.20000001788139343,
+      "max": 0.0
+    },
+    "Episode_Reward/tilt": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -0.0038409396074712276,
+      "last_value": -0.010971486568450928,
+      "min": -0.076996348798275,
+      "max": -0.0038409396074712276
+    },
+    "Episode_Reward/torques": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -0.0007834562566131353,
+      "last_value": -0.11832283437252045,
+      "min": -0.13200365006923676,
+      "max": -0.0007834562566131353
+    },
+    "Episode_Reward/upright": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 0.0006209862767718732,
+      "last_value": 1.5917104482650757,
+      "min": 0.0006209862767718732,
+      "max": 1.9054383039474487
+    },
+    "Episode_Reward/wheel_symmetry": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -0.0007936661131680012,
+      "last_value": -0.11996855586767197,
+      "min": -0.5869015455245972,
+      "max": -0.0007936661131680012
+    },
+    "Episode_Reward/yaw_rate": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -0.00013007529196329415,
+      "last_value": -0.011625871062278748,
+      "min": -0.03601330146193504,
+      "max": -0.00013007529196329415
+    },
+    "Episode_Termination/failed_to_recover": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 0.72119140625,
+      "last_value": 0.063232421875,
+      "min": 0.0390625,
+      "max": 0.74609375
+    },
+    "Episode_Termination/state_invalid": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 0.0,
+      "last_value": 0.0,
+      "min": 0.0,
+      "max": 0.0
+    },
+    "Episode_Termination/time_out": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 0.0,
+      "last_value": 0.936767578125,
+      "min": 0.0,
+      "max": 0.9609375
+    },
+    "Height/error": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -0.0013879835605621338,
+      "last_value": -0.00210726261138916,
+      "min": -0.005605787038803101,
+      "max": -0.0013879835605621338
+    },
+    "Height/now": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 0.17031902074813843,
+      "last_value": 0.1695997416973114,
+      "min": 0.16610121726989746,
+      "max": 0.17031902074813843
+    },
+    "Height/target": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 0.17170700430870056,
+      "last_value": 0.17170700430870056,
+      "min": 0.17170700430870056,
+      "max": 0.17170700430870056
+    },
+    "Joint/left_back_hip_pos": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -0.007810327224433422,
+      "last_value": -0.0011270324466750026,
+      "min": -0.007810327224433422,
+      "max": -0.0005829728906974196
+    },
+    "Joint/left_back_hip_tau": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 5.089568138122559,
+      "last_value": 8.782011985778809,
+      "min": 2.389003038406372,
+      "max": 9.213505744934082
+    },
+    "Joint/left_back_hip_vel": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 0.014756971038877964,
+      "last_value": -0.008764161728322506,
+      "min": -0.04010802507400513,
+      "max": 0.03322397172451019
+    },
+    "Joint/left_back_knee_pos": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 0.014055142179131508,
+      "last_value": 0.010625707916915417,
+      "min": 0.010407780297100544,
+      "max": 0.014055142179131508
+    },
+    "Joint/left_back_knee_tau": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -0.08700960874557495,
+      "last_value": 0.299623042345047,
+      "min": -0.27198970317840576,
+      "max": 0.6132488250732422
+    },
+    "Joint/left_back_knee_vel": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -0.04485679417848587,
+      "last_value": -0.02636750042438507,
+      "min": -0.04485679417848587,
+      "max": -0.003378912340849638
+    },
+    "Joint/left_front_hip_pos": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 0.0005020102253183722,
+      "last_value": 0.0005886022699996829,
+      "min": 0.0003887386992573738,
+      "max": 0.011417574249207973
+    },
+    "Joint/left_front_hip_tau": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -18.48476791381836,
+      "last_value": -19.055755615234375,
+      "min": -19.30358123779297,
+      "max": -10.148923873901367
+    },
+    "Joint/left_front_hip_vel": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -0.05664101988077164,
+      "last_value": -0.04293406382203102,
+      "min": -0.08294074982404709,
+      "max": 0.05298011749982834
+    },
+    "Joint/left_front_knee_pos": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -0.000668951019179076,
+      "last_value": -3.428451236686669e-05,
+      "min": -0.0012341940309852362,
+      "max": 1.4329234545584768e-05
+    },
+    "Joint/left_front_knee_tau": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -9.990610122680664,
+      "last_value": -9.475995063781738,
+      "min": -10.582313537597656,
+      "max": -9.249462127685547
+    },
+    "Joint/left_front_knee_vel": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 0.01130678690969944,
+      "last_value": 0.006543907802551985,
+      "min": -0.042890992015600204,
+      "max": 0.02261376567184925
+    },
+    "Joint/right_back_hip_pos": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -0.0007839149911887944,
+      "last_value": -0.0006240853690542281,
+      "min": -0.0037510767579078674,
+      "max": 6.379475235007703e-05
+    },
+    "Joint/right_back_hip_tau": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 10.987286567687988,
+      "last_value": 16.193622589111328,
+      "min": 3.927626609802246,
+      "max": 16.833539962768555
+    },
+    "Joint/right_back_hip_vel": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -0.0528293251991272,
+      "last_value": -0.026051616296172142,
+      "min": -0.0528293251991272,
+      "max": 0.01200919784605503
+    },
+    "Joint/right_back_knee_pos": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 0.004952691495418549,
+      "last_value": 0.004804547876119614,
+      "min": 0.0046234456822276115,
+      "max": 0.007097948342561722
+    },
+    "Joint/right_back_knee_tau": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -0.2755401134490967,
+      "last_value": 0.1638641208410263,
+      "min": -0.6200338006019592,
+      "max": 0.5090803503990173
+    },
+    "Joint/right_back_knee_vel": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 0.21885497868061066,
+      "last_value": 0.21808889508247375,
+      "min": 0.10839371383190155,
+      "max": 0.2252103090286255
+    },
+    "Joint/right_front_hip_pos": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 0.0005554453236982226,
+      "last_value": 0.0005046012811362743,
+      "min": 0.00040932136471383274,
+      "max": 0.01002556923776865
+    },
+    "Joint/right_front_hip_tau": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -18.713512420654297,
+      "last_value": -18.937271118164062,
+      "min": -19.362171173095703,
+      "max": -9.377248764038086
+    },
+    "Joint/right_front_hip_vel": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -0.05876762047410011,
+      "last_value": -0.05731397122144699,
+      "min": -0.08974140137434006,
+      "max": 0.03374436870217323
+    },
+    "Joint/right_front_knee_pos": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -2.045258770522196e-05,
+      "last_value": 1.95616994460579e-05,
+      "min": -0.00027487860643304884,
+      "max": 5.147469346411526e-05
+    },
+    "Joint/right_front_knee_tau": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -10.082372665405273,
+      "last_value": -9.70036506652832,
+      "min": -10.444515228271484,
+      "max": -9.144941329956055
+    },
+    "Joint/right_front_knee_vel": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -0.012858550995588303,
+      "last_value": -0.021020259708166122,
+      "min": -0.05982179567217827,
+      "max": 0.04089178144931793
+    },
+    "Joint/wheel_left_pos": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 1.127579689025879,
+      "last_value": 0.7103371024131775,
+      "min": -0.1552104949951172,
+      "max": 1.127579689025879
+    },
+    "Joint/wheel_left_tau": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 0.18163451552391052,
+      "last_value": 0.21805241703987122,
+      "min": -0.08841700851917267,
+      "max": 0.2516229748725891
+    },
+    "Joint/wheel_left_vel": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 0.41363221406936646,
+      "last_value": 0.1886434257030487,
+      "min": -0.17109860479831696,
+      "max": 1.4337055683135986
+    },
+    "Joint/wheel_right_pos": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 1.1450210809707642,
+      "last_value": 0.37457647919654846,
+      "min": -0.19800059497356415,
+      "max": 1.1450210809707642
+    },
+    "Joint/wheel_right_tau": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 0.12238883972167969,
+      "last_value": 0.05092109739780426,
+      "min": -0.08929719775915146,
+      "max": 0.30303314328193665
+    },
+    "Joint/wheel_right_vel": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 0.7189379930496216,
+      "last_value": 0.3381509780883789,
+      "min": -0.16941353678703308,
+      "max": 3.0422353744506836
+    },
+    "Loss/entropy": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 9.968493461608887,
+      "last_value": 10.545205116271973,
+      "min": 9.892375946044922,
+      "max": 10.545205116271973
+    },
+    "Loss/learning_rate": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 9.999999747378752e-06,
+      "last_value": 0.0012974634300917387,
+      "min": 9.999999747378752e-06,
+      "max": 0.0019461950287222862
+    },
+    "Loss/surrogate": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 0.008453619666397572,
+      "last_value": -0.006017342209815979,
+      "min": -0.009594850242137909,
+      "max": 0.008453619666397572
+    },
+    "Loss/value": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 2.7096128463745117,
+      "last_value": 0.1983654946088791,
+      "min": 0.01597893238067627,
+      "max": 2.7096128463745117
+    },
+    "Perf/collection_time": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 2.9070112705230713,
+      "last_value": 1.9329988956451416,
+      "min": 1.6950445175170898,
+      "max": 2.9070112705230713
+    },
+    "Perf/learning_time": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 0.21800637245178223,
+      "last_value": 0.0820004940032959,
+      "min": 0.07500100135803223,
+      "max": 0.21800637245178223
+    },
+    "Perf/total_fps": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 3932.0,
+      "last_value": 6098.0,
+      "min": 3932.0,
+      "max": 6924.0
+    },
+    "Policy/mean_std": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 1.6477607488632202,
+      "last_value": 1.880196452140808,
+      "min": 1.6386241912841797,
+      "max": 1.880196452140808
+    },
+    "State/ang_vel_z": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 0.01209278590977192,
+      "last_value": -0.015654996037483215,
+      "min": -0.1128280758857727,
+      "max": 0.03253968805074692
+    },
+    "State/base_height": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 0.17031902074813843,
+      "last_value": 0.1695997416973114,
+      "min": 0.16610121726989746,
+      "max": 0.17031902074813843
+    },
+    "State/hip_split": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 0.004455018788576126,
+      "last_value": 0.0011335104936733842,
+      "min": 0.0006252242019400001,
+      "max": 0.004455018788576126
+    },
+    "State/lin_vel_xy": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 0.11572443693876266,
+      "last_value": 0.06060443073511124,
+      "min": 0.02891995571553707,
+      "max": 0.15403668582439423
+    },
+    "State/pitch_deg": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -1.306268334388733,
+      "last_value": -0.07200300693511963,
+      "min": -1.306268334388733,
+      "max": 0.8534691333770752
+    },
+    "State/roll_deg": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -0.0136478953063488,
+      "last_value": -0.0607723593711853,
+      "min": -0.06178533285856247,
+      "max": 0.012040889821946621
+    },
+    "Train/mean_episode_length": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": 2.140000104904175,
+      "last_value": 925.8300170898438,
+      "min": 2.140000104904175,
+      "max": 1000.0
+    },
+    "Train/mean_episode_length/time": {
+      "n": 100,
+      "first_iter": 3,
+      "last_iter": 198,
+      "first_value": 2.140000104904175,
+      "last_value": 925.8300170898438,
+      "min": 2.140000104904175,
+      "max": 1000.0
+    },
+    "Train/mean_reward": {
+      "n": 100,
+      "first_iter": 7800,
+      "last_iter": 7899,
+      "first_value": -3.936600685119629,
+      "last_value": 77.55870056152344,
+      "min": -3.936600685119629,
+      "max": 88.3668212890625
+    },
+    "Train/mean_reward/time": {
+      "n": 100,
+      "first_iter": 3,
+      "last_iter": 198,
+      "first_value": -3.936600685119629,
+      "last_value": 77.55870056152344,
+      "min": -3.936600685119629,
+      "max": 88.3668212890625
+    }
+  },
+  "plots": [
+    "00_height_tracking.png",
+    "01_train.png",
+    "02_episode_reward.png",
+    "03_termination.png",
+    "04_losses.png",
+    "05_policy_lr.png",
+    "06_perf.png",
+    "07_base_state.png",
+    "08_joint_positions.png",
+    "09_joint_velocities.png",
+    "10_joint_torques.png"
+  ],
+  "height_tracking_csv": "height_tracking.csv",
+  "configs": [
+    "env.yaml",
+    "agent.yaml"
+  ],
+  "checkpoints": [
+    "model_7800.pt",
+    "model_7850.pt",
+    "model_7899.pt"
+  ],
+  "latest_checkpoint": "model_7899.pt",
+  "extra": {
+    "task": "Chassis-Stand-Up-Squat-v0",
+    "num_envs": 256,
+    "max_iterations": 400,
+    "device": "cuda:0",
+    "export_stage": "iter 7900（累计）"
+  }
+}

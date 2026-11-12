@@ -1,322 +1,332 @@
-# chassis_rl_lab 使用手册（训练 / 续训 / 回放 / 导出 / 数据）
+# chassis_rl_lab 使用手册（训练 / 续训 / 回放 / 数据 / 部署）
 
-> 所有命令都在**项目根**执行。8 GB 显存建议 `--num_envs 256`（1024 也能跑，显存更紧）。
+> 所有命令都在**项目根**执行。8 GB 显存建议 `--num_envs 256`（更稳；1024 有 GPU TDR 崩溃风险）。
 >
-> 当前是**三个任务**（可按需组合训练）：
-> - **阶段1** `Chassis-Stand-Up-v0`：从倒地 → 用轮子起立 → 保持平衡；**屏蔽髋关节输出**（髋 PD 锁 squat、腿不动，策略实际只控 2 个轮子）；
-> - **恢复任务** `Chassis-Stand-Up-Recovery-v0`：**随机方向倒地 → 髋自由起立 → 保持平衡**，不跟踪高度/腿长（从阶段1续训用）；
-> - **阶段2** `Chassis-Stand-Up-Height-v0`：在恢复任务基础上**按指令改变机体高度**（高度指令随机 + 高度奖励）。
+> ```powershell
+> cd D:\Robomaster\RL\chassis_rl_lab
+> ```
 >
-> 三个任务观测（25 维）/动作（6 维接口）完全一致，可直接互相 `--resume`。
+> 观测 **25 维** / 动作 **6 维**（4 髋力矩 + 2 轮力矩），所有任务维度一致，可互相 `--resume`。
 
-## 0. 先进入项目根（以下所有命令的前提）
+## 1. 任务一览
+
+| 任务 id | 用途 | 起点 | 髋关节 | 高度指令 |
+|---|---|---|---|---|
+| `Chassis-Stand-Up-Squat-Fixed-v0` | **课程①**：固定方向倒地→起立→蹲姿平衡 | 收腿倒地（pitch +14~19° 固定） | 全开放（6 维力矩） | 固定最低 0.1717 m |
+| `Chassis-Stand-Up-Squat-v0` | **课程②**：随机方向倒地→起立→蹲姿平衡 | 收腿倒地（方向随机） | 全开放 | 固定最低 0.1717 m |
+| `Chassis-Stand-Up-Height-v0` | **课程③**：变腿长（高度跟踪 0.172~0.270 m） | 收腿倒地（方向随机） | 全开放 | 每 episode 随机 |
+| `Chassis-Stand-Up-Recovery-v0` | 旧版：倒地自起+平衡（不跟踪高度） | 收腿倒地（随机） | 全开放 | 固定名义 0.1716 m |
+| `Chassis-Stand-Up-v0` | 旧版：屏蔽髋、纯轮平衡（阶段1预训练） | 倒地（squat 腿型） | **屏蔽**（腿不动） | 固定名义 0.1716 m |
+
+**推荐训练顺序（课程 A）**：`Squat-Fixed` → `Squat` → `Height`，每段 `--resume` 上一段。
+
+## 2. 最常用命令
+
+### 2.1 课程① 固定方向倒地（最低腿长 + 髋全开放）
 
 ```powershell
-cd D:\Robomaster\RL\chassis_rl_lab
+# 从已有模型继续（推荐）：--resume --load_checkpoint <模型路径>
+D:\miniconda\envs\RM\python.exe scripts\train.py --headless ^
+  --task Chassis-Stand-Up-Squat-Fixed-v0 ^
+  --resume --load_checkpoint "logs\rsl_rl\chassis_rl_stand_up\2026-11-07_20-46-35_squat_hips_cont\model_6698.pt" ^
+  --num_envs 256 --max_iterations 500 --export_interval 100 --run_name c1_fixed
+
+# 从头训练：去掉 --resume 那一行
 ```
 
-## 1. 最常用三条（先跑起来）
+### 2.2 课程② 随机方向倒地
 
 ```powershell
-# 阶段1训练（数据会自动存到 data\<时间戳>_<run名>\）
-D:\miniconda\envs\RM\python.exe scripts\train.py --headless --num_envs 1024 --max_iterations 1500 --run_name stage1
-
-# 回放最新模型（默认带 IMU 噪声、带平衡辅助）
-D:\miniconda\envs\RM\python.exe scripts\play.py --headless --num_envs 1 --episodes 5 --checkpoint -1
-
-# 看训练曲线（TensorBoard）
-D:\miniconda\envs\RM\python.exe -m tensorboard.main --logdir logs\rsl_rl
+D:\miniconda\envs\RM\python.exe scripts\train.py --headless ^
+  --task Chassis-Stand-Up-Squat-v0 ^
+  --resume --load_run ".*c1_fixed" --load_checkpoint -1 ^
+  --num_envs 256 --max_iterations 500 --export_interval 100 --run_name c2_random
 ```
 
-## 2. 两阶段训练流程（核心）
-
-### 2.1 阶段1：倒地起立 + 平衡（`Chassis-Stand-Up-v0`）
+### 2.3 课程③ 变腿长（0.172~0.270 m）
 
 ```powershell
-D:\miniconda\envs\RM\python.exe scripts\train.py --headless --num_envs 1024 --max_iterations 1500 --run_name stage1
+D:\miniconda\envs\RM\python.exe scripts\train.py --headless ^
+  --task Chassis-Stand-Up-Height-v0 ^
+  --resume --load_run ".*c2_random" --load_checkpoint -1 ^
+  --num_envs 256 --max_iterations 1500 --export_interval 100 --run_name c3_height
 ```
 
-- 环境：从倒地姿态（squat 腿型）开始；动作保持 6 维接口但**前 4 维髋输出被屏蔽**（髋 PD 锁 squat、腿不动），策略实际只控 **2 个轮力矩（≤±4.92 Nm）**；
-- 高度指令固定在名义高度（0.1716 m），高度奖励权重为 0 → 只学"站起来并保持平衡"；
-- **倒地方向课程 + 分阶段辅助退火**（每阶段 300 iter）：
-  - iter 0–300：pitch **正**方向倒地，辅助力在 300 iter 内 1→0 退火；
-  - iter 301–600：pitch **负**方向倒地，辅助力在 300 iter 内 1→0 退火；
-  - iter >600：**无辅助力**，pitch 正/负每 episode **随机**。
+- 高度指令带 curriculum（1500 iter 内从名义高度慢慢放开到 0.270）；
+- 奖励：`exp(-(h-h_cmd)²/0.0025)×3.0` + 误差平方惩罚 `-(h-h_cmd)²×40` + 高度变化率惩罚；
+- 成功判据：`Episode_Reward/base_height_track` 上升、`Height/now` 跟随 0.172~0.270、`State/hip_split` < 0.05 rad。
 
-**阶段1 成功判据**（TensorBoard）：
+### 2.4 既有模型的当前水平（参考）
 
-- `Train/mean_episode_length` → 接近 **1000**（20 s 全程都在平衡）；
-- `Episode_Termination/failed_to_recover` → 从 1.0 降到 **0**；
-- `Episode_Reward/upright` 上升；
-- **iter > 600（无辅助）后** `mean_episode_length` 不回落，两个方向都能站起来。
+| run / checkpoint | 行为 |
+|---|---|
+| `2026-11-07_20-46-35_squat_hips_cont\model_6698` | 蹲姿（最低腿长）起立+平衡：ep_len 1000、failed_to_recover 0、高度误差 +0.6 mm、劈叉 0.009 rad |
+| `2026-11-07_18-35-00_stage2_sym027_v2\model_5899` | 变腿长：0.172~0.270 m 跟踪误差 ≤ 数 mm、劈叉 0.014 rad |
 
-### 2.2 阶段2：在阶段1基础上按指令变高度（`Chassis-Stand-Up-Height-v0`）
+## 3. 回放 / 查看效果
+
+### 3.1 回放（GUI 窗口）
 
 ```powershell
-# 1) 先看阶段1最新 checkpoint 名（也可用 model_<数字>.pt 指定最好的那次）
-dir logs\rsl_rl\chassis_rl_stand_up\*stage1\model_*.pt
+# 蹲姿模型（课程①②）：去掉 --headless 就会打开 Isaac Sim 视口
+D:\miniconda\envs\RM\python.exe scripts\play.py --task Chassis-Stand-Up-Squat-v0 ^
+  --load_run ".*c2_random" --checkpoint -1 --num_envs 1 --episodes 2 --no-assist --trace
 
-# 2) 续训（--max_iterations 必须大于阶段1已训迭代数）
-D:\miniconda\envs\RM\python.exe scripts\train.py --headless --task Chassis-Stand-Up-Height-v0 --resume --load_run ".*stage1" --load_checkpoint model_1000.pt --num_envs 1024 --max_iterations 1000 --run_name stage2_height
+# 变腿长模型（课程③）：--height_sweep 每 N 步在最低/最高高度间切换，肉眼可见起伏
+D:\miniconda\envs\RM\python.exe scripts\play.py --task Chassis-Stand-Up-Height-v0 ^
+  --load_run ".*c3_height" --checkpoint -1 --num_envs 1 --episodes 2 --no-assist ^
+  --height_sweep --sweep_interval 100 --trace
 ```
 
-- 阶段2 **放开髋**（4 髋力矩 ≤±20 Nm + 2 轮力矩全部生效）；起始改为"收腿倒地"（髋收到最短 q=0，开局 0.4 s 收腿稳定）；高度指令每 episode 在 **0.172~0.270 m** 随机（带 curriculum，续训时从续训点起慢慢放开）+ 高度跟踪奖励 `exp(-(h-h_cmd)²/0.0025)×3.0` + 误差平方惩罚 `-(h-h_cmd)²×40`；
-- 观测/动作维度与阶段1相同，所以 `--resume` 直接加载阶段1网络继续训练（迭代数接着算）；
-- 训练数据同样自动落到 `data/<时间戳>_stage2_height/`。
+- `--trace`：打印 `pitch/roll/base_z`；Height 任务额外打印 `h_cmd`（指令高度）/`h_err`；
+- `--height_sweep` 的范围取任务 cfg（Height 任务为 0.172↔0.270）；
+- 回放默认带观测噪声、带辅助（辅助退火从 1.0 重来）；判断真实水平请加 `--no-assist`，要看理想观测加 `--no-noise`。
 
-**阶段2 成功判据**：`Episode_Reward/base_height_track` 上升（最高 2.0）、`failed_to_recover` 保持 0、`mean_episode_length` 接近 1000。
-
-### 2.3 恢复任务：随机方向倒地自起（`Chassis-Stand-Up-Recovery-v0`）
-
-只练"**随机方向倒地 → 站起来 → 保持平衡**"，**不跟踪高度/腿长**（高度指令固定、高度奖励权重 0）。
-髋关节自由（6 维力矩全部生效），用于从上个阶段继续训练"倒地自起"：
+### 3.2 查看指定 run / 指定 .pt
 
 ```powershell
-# 从阶段1的 model_750 继续训练
-D:\miniconda\envs\RM\python.exe scripts\train.py --headless --task Chassis-Stand-Up-Recovery-v0 ^
-    --resume --load_checkpoint "logs\rsl_rl\chassis_rl_stand_up\2026-11-06_22-29-04_stage1\model_750.pt" ^
-    --num_envs 256 --max_iterations 750 --run_name recovery
-```
-
-- 起始：倒地姿态（pitch **正/负每 episode 随机**）+ 髋收到最短腿长（q=0）+ 开局 0.4 s 收腿稳定；
-- 奖励：只有起立/平衡/速度/平滑等项，**无高度跟踪**；
-- 无辅助力（阶段1 已学会轮平衡）；
-- 成功判据：`Train/mean_episode_length` → 1000、`Episode_Termination/failed_to_recover` → 0。
-
-### 2.4 评估不同阶段/效果
-
-```powershell
-# 阶段1（倒地起立/平衡）：纯策略（关辅助）+ 带噪声
-D:\miniconda\envs\RM\python.exe scripts\play.py --num_envs 2 --episodes 5 --no-assist --checkpoint -1
-
-# 阶段2（高度跟踪）：纯策略 + 曲线（打印 pitch/roll/高度）
-D:\miniconda\envs\RM\python.exe scripts\play.py --task Chassis-Stand-Up-Height-v0 --num_envs 1 --episodes 1 --no-assist --trace --checkpoint -1
-
-# 指定某个阶段的 run
-D:\miniconda\envs\RM\python.exe scripts\play.py --load_run ".*stage1" --checkpoint -1 --episodes 5 --no-assist
-D:\miniconda\envs\RM\python.exe scripts\play.py --task Chassis-Stand-Up-Height-v0 --load_run ".*stage2_height" --checkpoint -1 --episodes 5 --no-assist
-```
-
-### 2.5 查看指定的 run / 指定的 .pt 文件
-
-**① 列出所有 checkpoint（按时间排序）**
-
-```powershell
+# 列出所有 checkpoint（按时间）
 Get-ChildItem logs\rsl_rl\chassis_rl_stand_up -Recurse -Filter "model_*.pt" |
   Sort-Object LastWriteTime | Select-Object FullName, LastWriteTime
+
+# 回放指定 .pt（完整路径最稳）
+D:\miniconda\envs\RM\python.exe scripts\play.py --task Chassis-Stand-Up-Squat-v0 ^
+  --checkpoint "logs\rsl_rl\chassis_rl_stand_up\<run>\model_XXXX.pt" --num_envs 1 --episodes 2 --no-assist
+
+# 看 .pt 内容（迭代数/键名）
+D:\miniconda\envs\RM\python.exe -c "import torch; d=torch.load(r'logs\rsl_rl\chassis_rl_stand_up\<run>\model_XXXX.pt', map_location='cpu', weights_only=False); print(list(d.keys())); print('iter =', d.get('iter'))"
 ```
 
-**② 看某个 run 里有哪些 .pt**
+### 3.3 量化检查（无窗口）
 
 ```powershell
-dir logs\rsl_rl\chassis_rl_stand_up\2026-11-06_22-29-04_stage1\model_*.pt
+# 高度跟踪：给 0.172 / 0.221 / 0.270 三档指令，打印实测高度/误差/劈叉（仅适合 Height 模型）
+D:\miniconda\envs\RM\python.exe tools\check_height_tracking.py ^
+  --checkpoint "logs\rsl_rl\chassis_rl_stand_up\<run>\model_XXXX.pt" --num_envs 3
+
+# 环境自检（动作/观测维度、奖励有限性、基础高度）
+D:\miniconda\envs\RM\python.exe tools\check_env.py --task Chassis-Stand-Up-Squat-v0 --num_envs 8 --steps 120
 ```
 
-**③ 回放"指定 run 的最新 checkpoint"**
+### 3.4 TensorBoard
 
 ```powershell
-D:\miniconda\envs\RM\python.exe scripts\play.py --load_run ".*22-29-04_stage1" --checkpoint -1 --episodes 5 --no-assist
+D:\miniconda\envs\RM\python.exe -m tensorboard.main --logdir logs\rsl_rl\chassis_rl_stand_up --port 6006
 ```
 
-**④ 回放"指定 run 的指定 .pt"**（run 用 `--load_run` 正则，文件名用 `--checkpoint`）
+重点指标：`Height/target`、`Height/now`、`Height/error`、`State/hip_split`、`Episode_Reward/base_height_track`、
+`Train/mean_episode_length`、`Episode_Termination/failed_to_recover`。
 
-```powershell
-D:\miniconda\envs\RM\python.exe scripts\play.py --task Chassis-Stand-Up-v0 ^
-  --load_run ".*22-29-04_stage1" --checkpoint model_750.pt --episodes 5 --no-assist
-```
+## 4. 训练数据（`data/`，按时间戳快照，不覆盖）
 
-**⑤ 直接用 .pt 的完整路径**（不依赖 run 匹配，最稳）
-
-```powershell
-D:\miniconda\envs\RM\python.exe scripts\play.py --task Chassis-Stand-Up-v0 ^
-  --checkpoint "logs\rsl_rl\chassis_rl_stand_up\2026-11-06_22-29-04_stage1\model_750.pt" ^
-  --episodes 5 --no-assist
-```
-
-**⑥ 看 .pt 里存了什么（迭代数 / 网络键名）**
-
-```powershell
-D:\miniconda\envs\RM\python.exe -c "import torch; d=torch.load(r'logs\rsl_rl\chassis_rl_stand_up\2026-11-06_22-29-04_stage1\model_750.pt', map_location='cpu', weights_only=False); print(list(d.keys())); print('iter =', d.get('iter'))"
-```
-
-**⑦ 批量评估（headless）**
-
-```powershell
-D:\miniconda\envs\RM\python.exe scripts\play.py --headless --num_envs 16 --episodes 20 ^
-  --task Chassis-Stand-Up-v0 --checkpoint "logs\rsl_rl\chassis_rl_stand_up\2026-11-06_22-29-04_stage1\model_750.pt"
-```
-
-> 说明：
-> - `--checkpoint -1` = 在匹配 `--load_run` 的**最新 run** 里取**迭代数最大**的 .pt；
-> - `--load_run` 是正则；**每次启动训练都会新建 run 目录**，同一个正则可能匹配到多个 run（取按名排序的最后一个）。要精确回放请写带时间戳的 run 名，或直接用方式⑤的完整路径；
-> - 回放的 `--task` 要与 checkpoint 的训练任务一致（三种任务观测 25/动作 6 维度兼容，但物理/控制语义不同；旧的 2 维 action 检查点不能用）；
-> - GUI 看效果：去掉 `--headless`，加 `--num_envs 1 --episodes 1`；`--trace` 会打印 pitch/roll/base_z 以及 Height 任务的 `h_cmd`（指令高度）/`h_err`（误差）。
-> - **回放/评估时高度指令会自动随机**（播放会关闭 curriculum；否则新进程的指令恒为名义高度 0.1716，看起来"机器人不会变高度"）。部署 ONNX 时也必须由外部给高度指令（obs 中 `commands[2] = height_cmd × 5`），否则策略只会保持默认高度。
-
-## 3. 指令替换对照表
-
-### 3.1 训练 / 续训
-
-| 我想… | 加入/替换的参数 | 说明 |
-|---|---|---|
-| 换阶段 | `--task Chassis-Stand-Up-v0` / `--task Chassis-Stand-Up-Height-v0` | 阶段1 / 阶段2 |
-| 换并行环境数 | `--num_envs 256` / `--num_envs 1024` | 8 GB 显存 256 稳 |
-| 换训练长度 | `--max_iterations 1500` | 默认取 agent cfg |
-| 区分实验 | `--run_name stage1` / `--run_name test_v2` | 日志目录后缀（带时间戳） |
-| 数据保存频率 | `--export_interval 100` | 训练中每 N 轮导出一次累计数据（默认 100；0=只在结束时导出） |
-| 换实验目录 | `--experiment_name chassis_rl_stand_up2` | 默认 `chassis_rl_stand_up` |
-| 换随机种子 | `--seed 17`（默认已改为 17） | 之前 seed=42 会在 1024 envs、iter 169 触发可复现崩溃 |
-| 改保存间隔 | `--save_interval 100` | 默认 50 |
-| 不导出数据 | `--no_data_export` | |
-| 换数据目录 | `--data_root D:\rl_data` | 默认 `<项目根>\data` |
-| 续训最新 | `--resume` | 自动找该实验最新 run 的最新 checkpoint |
-| 阶段2 续阶段1 | `--task Chassis-Stand-Up-Height-v0 --resume --load_run ".*stage1" --load_checkpoint model_1000.pt` | `--max_iterations` 要大于阶段1已训迭代数 |
-| 续训指定文件 | `--resume --load_checkpoint <完整路径>` | |
-
-### 3.2 回放（看不同效果）
-
-| 我想看… | 参数 |
-|---|---|
-| 默认效果（带噪声+辅助） | 什么都不加 |
-| **纯策略**（判断真学会没有） | `--no-assist` |
-| 理想观测（无噪声对照） | `--no-noise` |
-| 逐步姿态曲线（pitch/roll/高度） | `--trace` |
-| 指定 run 的最新 .pt | `--load_run ".*22-29-04_stage1" --checkpoint -1` |
-| 指定 run 的指定 .pt | `--load_run ".*22-29-04_stage1" --checkpoint model_750.pt` |
-| 指定 .pt 完整路径 | `--checkpoint "logs\...\model_750.pt"`（不依赖 run 匹配） |
-| 看"变腿高"明显起伏 | `--height_sweep --sweep_interval 100`（Height 任务：每 100 步在 0.172↔0.270 切换） |
-| 量化高度跟踪误差 | `... tools\check_height_tracking.py --checkpoint <pt> --num_envs 3` |
-| 指定阶段2任务 | `--task Chassis-Stand-Up-Height-v0` |
-| 统计数 / 单回合步数 | `--episodes 5` / `--steps 500` |
-| 开窗口 | 去掉 `--headless` |
-
-### 3.3 导出 / 数据 / 自检
-
-| 我想… | 命令 |
-|---|---|
-| 导出 ONNX（最新，自动按任务取） | `... scripts\export_onnx.py --checkpoint -1` |
-| 导出阶段2模型 | `... scripts\export_onnx.py --task Chassis-Stand-Up-Height-v0 --load_run ".*stage2_height" --checkpoint -1` |
-| 校验 ONNX | `... -c "import onnx;m=onnx.load(r'exports\chassis_standup_policy.onnx');onnx.checker.check_model(m);print('OK')"` |
-| 导出某 run 训练数据 | `... tools\export_training_data.py --log_dir logs\rsl_rl\chassis_rl_stand_up\<run>` |
-| 环境自检 | `... tools\check_env.py --num_envs 16 --steps 200`（阶段2加 `--task Chassis-Stand-Up-Height-v0`） |
-| 展示用 USD | `... tools\make_display_usd.py --verify` |
-
-## 4. 任务说明（两阶段对比）
-
-| 项 | 阶段1 `Chassis-Stand-Up-v0` | 阶段2 `Chassis-Stand-Up-Height-v0` |
-|---|---|---|
-| 目标 | 倒地 → 起立 → 保持平衡 | 保持平衡 + 按指令改变高度 |
-| 起始状态 | 倒地姿态（pitch 14~19°，**squat 腿型、髋被 PD 锁住**）；方向按课程切换：0–300 iter **正**、301–600 iter **负**、之后**随机** | 倒地姿态 + **髋收到最短腿长（q=0）**；开局 0.4 s「收腿稳定」后交给策略（方向同样按课程切换） |
-| 动作（6 维） | 6 维接口，但**前 4 维髋输出被屏蔽**（髋 PD 锁 squat）；实际只控 2 轮力矩（×1 Nm，夹 ±4.92） | **6 维全部生效**：4 髋力矩（×2.5 Nm，夹 ±20）+ 2 轮力矩（×1 Nm，夹 ±4.92） |
-| 观测（25 维） | ang_vel×0.25 → gravity → commands(固定名义高度) → hip_pos_rel → dof_vel×0.05 → actions | 同左（commands[2] 每 episode 随机高度×5） |
-| 高度指令 | 固定 0.1716 m | 随机 ∈ [0.172, 0.270] m（下限=收腿最短，上限≈髋伸展0.60rad；运动学极限0.2825），curriculum 1500 iter |
-| 高度奖励 | 关闭（权重 0） | `exp(-(h-h_cmd)²/0.0025)` 权重 3.0 + `height_error_l2` 权重 -40 |
-| 终止 | 超时 + 未恢复（300 步后倾角 >0.25 rad） | 同左 |
-| 平衡辅助 | 轮上 PD：每阶段（300 iter）内 1→0 退火，前 2 阶段有辅助，**iter>600 无辅助** | 关闭（阶段1 已学会轮平衡） |
-
-## 5. 训练数据（`data/`）
-
-**每轮记录的实际状态指标**（用于分析策略/关节表现，自动进 `data/<run>/`）：`Height/target|now|error`（目标 vs 当前高度）、`State/base_height|pitch_deg|roll_deg|lin_vel_xy|ang_vel_z`（机体姿态/速度）、`Joint/<关节名>_pos|_vel|_tau`（4 hip + 4 knee + 2 wheel 的位置/速度/力矩）。
-
-**控制台输出**：训练时每轮打印精简信息——第一行是训练轮次 `[iter 当前/总]`，之后从 `Mean value loss` 开始（去掉了 Total steps/速度/耗时等标题行），并在 `Mean action std` 后追加三行：`Height target`（目标高度）、`Height now`（当前高度）、`Height error`（误差）；完整曲线照常写入 TensorBoard 与 `data/<run>/`。
-
-训练中每隔 `--export_interval` 轮（默认 **100**）自动导出一次**从训练开始到当前**的累计数据（覆盖同一个 `data/<run>/` 目录），训练结束 / Ctrl+C 时再导出最终版：
+每 `--export_interval` 轮（默认 100）导出一次"从训练开始到当前"的累计数据，
+**每次在 run 文件夹内新建一个时间戳快照**（历史全部保留）；训练结束 / Ctrl+C 再存最终快照：
 
 ```
 data\<时间戳>_<run名>\
-    metrics.csv        全部指标（iteration,tag,value 长格式；含 Height/State/Joint/* 等实际状态指标）
-    height_tracking.csv 高度跟踪宽表（iteration,height_target,height_now,height_error）
-    summary.json       每指标 first/last/min/max + checkpoint 列表 + 训练配置
-    README.md          人读摘要（含最终 reward / episode 长度）
-    env.yaml / agent.yaml
-    plots\
-        00_height_tracking.png  目标高度 vs 当前高度 / 跟踪误差（Height 任务）
-        01_train.png  02_episode_reward.png  03_termination.png
-        04_losses.png 05_policy_lr.png       06_perf.png
-        07_base_state.png       机体高度 / pitch-roll / 线速度-角速度
-        08_joint_positions.png  每个关节位置（4 hip + 4 knee + 2 wheel）
-        09_joint_velocities.png 每个关节速度
-        10_joint_torques.png    每个关节力矩
+    snapshot_<YYYYmmdd_HHMMSS>\
+        metrics.csv          全部指标（iteration,tag,value 长格式；含 Height/State/Joint/*）
+        height_tracking.csv  高度跟踪宽表（height_target / height_now / height_error）
+        summary.json         各指标 first/last/min/max + checkpoint 列表 + 训练配置
+        README.md
+        env.yaml / agent.yaml
+        plots\
+            00_height_tracking.png   目标 vs 当前高度 / 误差
+            01_train.png             平均奖励 / episode 长度
+            02_episode_reward.png    奖励分项
+            03_termination.png       终止项比例
+            04_losses.png            损失
+            05_policy_lr.png         lr / action std
+            06_perf.png              FPS / 耗时
+            07_base_state.png        机体高度 / pitch-roll / 速度 / 劈叉
+            08_joint_positions.png   各关节位置（4 hip + 4 knee + 2 wheel）
+            09_joint_velocities.png  各关节速度
+            10_joint_torques.png     各关节力矩
 ```
 
-补导出已有 run：`... tools\export_training_data.py --log_dir <run> [--data_root D:\rl_data]`
+打开最新快照：
 
-## 6. 想改训练行为：改 env cfg 开关
+```powershell
+$run  = Get-ChildItem data -Directory | Sort-Object Name | Select-Object -Last 1
+$snap = Get-ChildItem $run.FullName -Directory | Sort-Object Name | Select-Object -Last 1
+start "" "$($snap.FullName)\plots"
+start "" "$($snap.FullName)\height_tracking.csv"
+```
 
-| 想改变的行为 | 改哪个字段 | 默认值 → 可试 |
+补导出已有 run：`... tools\export_training_data.py --log_dir <run 目录> [--data_root D:\rl_data]`
+
+## 5. 指令替换对照表
+
+### 5.1 训练 / 续训
+
+| 我想… | 参数 |
+|---|---|
+| 换课程阶段 | `--task Chassis-Stand-Up-Squat-Fixed-v0 / Chassis-Stand-Up-Squat-v0 / Chassis-Stand-Up-Height-v0` |
+| 并行环境数 | `--num_envs 256`（默认；1024 易触发驱动 TDR） |
+| 训练长度 | `--max_iterations 500`（这是**追加**轮数；续训从 checkpoint 的 iter 接着算） |
+| 区分实验 | `--run_name c1_fixed` |
+| 续训最新 | `--resume`（自动找该实验最新 run 的最新 checkpoint） |
+| 续训指定 run 的最新 | `--resume --load_run ".*c2_random" --load_checkpoint -1` |
+| 续训指定 .pt | `--resume --load_checkpoint "logs\...\model_6698.pt"` |
+| 数据保存频率 | `--export_interval 100`（0 = 只在结束时导出） |
+| 不导出数据 | `--no_data_export` |
+| 改数据根目录 | `--data_root D:\rl_data` |
+| 随机种子 | `--seed 17`（默认） |
+| 保存间隔 | `--save_interval 50`（默认） |
+
+### 5.2 回放 / 导出
+
+| 我想… | 命令 |
+|---|---|
+| 回放最新模型 | `... scripts\play.py --load_run ".*<run>" --checkpoint -1 --episodes 2 --no-assist` |
+| 回放指定 .pt | `... scripts\play.py --checkpoint "logs\...\model_XXXX.pt" ...` |
+| 看变腿高起伏 | 加 `--height_sweep --sweep_interval 100`（仅 Height 任务） |
+| 打印逐步数值 | 加 `--trace` |
+| GUI 窗口 | 去掉 `--headless`，`--num_envs 1` |
+| 导出 ONNX（最新） | `... scripts\export_onnx.py --checkpoint -1`（输出 `exports\chassis_standup_policy.onnx`，25 维输入） |
+| 导出指定 .pt | `... scripts\export_onnx.py --task Chassis-Stand-Up-Height-v0 --checkpoint "logs\...\model_XXXX.pt"` |
+| 校验 ONNX | 独立进程：`... -c "import onnx;m=onnx.load(r'exports\chassis_standup_policy.onnx');onnx.checker.check_model(m);print('OK')"` |
+| 环境自检 | `... tools\check_env.py --task <任务 id> --num_envs 8 --steps 120` |
+| 展示用 USD | `... tools\make_display_usd.py --verify` |
+
+## 6. 鲁棒性（当前训练默认开启）
+
+| 类别 | 内容 | 位置 |
 |---|---|---|
-| **阶段1 屏蔽髋输出** | `ActionsCfg.wheel_leg.mask_hip_actions` | `True`（阶段1）；阶段2 `False` |
-| 髋执行器（阶段1/2） | `SceneCfg.robot` 的 hips `stiffness/damping` | 阶段1：默认 PD `300/10`（锁 squat）；阶段2：`0/2.0`（纯力矩+被动阻尼） |
-| 髋位置控制（非力矩） | `hip_control` | `"torque"` → `"position"`（+ actuators 恢复 hips 增益） |
-| 髋持续力矩上限 | `robots/chassis_rl_cfg.py` 的 `HIP_EFFORT_LIMIT` | `20` Nm（峰值 40 只留档） |
-| 平衡辅助开关/退火 | `balance_assist / assist_cycle_steps / assist_phases` | `True / 48*300 / 2`（每阶段 300 iter 内 1→0 退火，之后无辅助） |
-| 倒地方向课程长度 | `CURRICULUM_PHASE_STEPS` | `48*300`（=300 iter/阶段；若改 num_steps_per_env 需同步换算） |
-| 恢复任务方向随机 | `EventCfgRecovery.reset_root.phase_steps` | `0`（每个 episode 正/负随机，不按课程） |
-| 高度区间 / curriculum | `HEIGHT_COMMAND_RANGE` / `HEIGHT_CURRICULUM_STEPS` | `(0.172, 0.270)` / `48*1500`（0.270 接近运动学极限 0.2825；课程慢放开防"站最低忽略指令"） |
-| 左右对称（防劈叉） | `RewardsCfg.hip_symmetry / wheel_symmetry` | `-2.0`（髋角左右差²）/ `-0.02`（轮速差²） |
-| 起始姿态（倒地↔站立） | `EventCfg.reset_root.pose_range.pitch` | 倒地 `(0.24,0.34)`；站立改 `(-0.05,0.05)` |
-| 阶段2 倒地时腿长 | `EventCfgHeight.reset_hips`（`RETRACTED_HIPS`/`noise`） | 默认收到最短（q=0）；阶段1 用 squat ±0.02 |
-| 阶段2 开局收腿稳定 | `ActionsCfgStage2.wheel_leg.settle_steps / settle_hip_kp / settle_hip_kd` | 20 步（0.4 s）/ 300 / 10；阶段1 为 0 |
-| 阶段2 髋被动阻尼 | `SceneCfg.robot` 的 hips `damping` | 2.0（0 时腿塌陷会"弹飞"） |
-| 站立→自然倒地→起立 | `wheel_unpowered_steps` | `0`（直接倒地）→ `40`（先自然倒地） |
-| 终止阈值 | `failed_to_recover.limit_rad / grace_steps` | `0.25 rad / 300` |
-| 推力扰动 | `EventCfg.push_robot` | 默认每 2–4 s 推一次；`None` 关掉 |
-| PPO 超参 | `tasks/stand_up/agents/rsl_rl_ppo_cfg.py` | `num_steps_per_env=48`、`entropy_coef=0.01`、`init_std=1.8`、`clip_actions=8.0` |
+| 观测噪声 | BMI088 陀螺/加速度计噪声 | `sensor_noise.py` + ObsTerm |
+| IMU 零偏/安装误差 | 陀螺零偏 ±0.01 rad/s、倾角偏置 ±1°（每 episode） | `EventCfg.reset_sensor_bias` |
+| 动作延迟 | 每 env 随机 0~2 控制步（≈0~40 ms） | `ActionsCfg*.wheel_leg.action_delay_max` |
+| 力矩误差/滞后 | 缩放 ±10%、一阶低通 20~50 ms | `torque_scale_range / torque_lpf_tau_range` |
+| 物理参数 DR | 轮-地摩擦 0.3~1.2、机身质量 ±0.5 kg、质心 ±1 cm、关节摩擦 0~0.05、执行器增益 0.8~1.2 | `EventCfg.randomize_*`（startup） |
+| 随机推力 | 每 1.5~3 s，±0.25 m/s / yaw ±0.3；强冲击每 6~10 s，±0.45 m/s | `EventCfg.push_robot / push_robot_strong` |
+| 起始随机 | 倒地方向/姿态/速度、髋初始角、高度指令 | `EventCfg.reset_*` |
+| 行为约束 | 左右对称（hip_symmetry −2.0 / wheel_symmetry −0.02）、倒地方向课程 | `RewardsCfg` |
+| 安全 | 动作限幅、NaN 防护、异常状态终止 | `actions.py / wrappers.py / terminations.py` |
 
-> 改配置训练时换一个 `--run_name`，`logs/`、`data/` 能区分；续训按 `--load_run ".*<run名>"` 找回。
+关闭个别项：把对应 `EventTerm` 设为 `None`（如 `EventCfg.push_robot_strong = None`）或把参数调温和。
 
-## 7. 常见坑
+## 7. 真机部署要点
 
-1. **没 cd 到项目根** → `scripts\train.py` 找不到（日志也会写错位置）。
-2. `--task` 必须是注册 id（阶段1 `Chassis-Stand-Up-v0` / 阶段2 `Chassis-Stand-Up-Height-v0`），不是 run 名。
-3. 回放默认**带辅助**（辅助退火从 1.0 重新开始）；判断策略真实水平请加 `--no-assist`。
-4. **旧 checkpoint（2 维动作 / 旧 25 维布局）不能用于新任务**；两阶段之间可以 resume（观测 25 / 动作 6 相同，阶段1 髋输出虽被屏蔽但维度保留）。
-5. 导出 ONNX 后**不要在 Isaac Sim 进程内**做 `onnx.checker`（Windows 会崩），用独立进程校验。
+### 7.1 高度 / 腿长 / 髋角 换算
 
-## 8. 稳定性：TDR 调参与 NaN 防护
+完整公式、对照表与电机角换算见独立文档 **[interface.md](interface.md)**（§3）。
 
-### 8.1 Windows TDR（显卡超时检测与恢复）
+速记：
 
-训练偶发崩溃、事件查看器里出现 `nvlddmkm` + `LiveKernelEvent` / `LKD_0x141_Tdr` 时，
-是 Windows 的 TDR 机制在"显卡内核超时（默认约 2 s）"后复位驱动。**需以管理员身份**执行
-（重启后生效）：
+- `h = L0 + 0.0376 m`（L0 = 轮轴到髋电机轴的竖直距离；`0.0376 = r − z_hip`）；
+- 相对 squat：`Δh = ΔL0`（常数抵消）；
+- squat 参考：`h = 0.17561 m`、`L0 = 138.0 mm`；
+- 精确计算：`FiveBarSolver.base_height(q)`（见 interface.md §3.4）。
+
+### 7.2 关节角坐标：仿真 vs 电机返回角
+
+仿真/URDF 用 **CAD 零位关节角**（q=0 = 机械收回端）；你最初填写的 `底盘数据.txt` 是**电机返回角**，
+两者只差常数零位偏置（范围宽度一致）：
+
+| 关节 | 仿真关节角范围 | 电机返回角范围 | 换算 |
+|---|---|---|---|
+| 前髋 | 0 ~ +85.31° | −10.15° ~ +75.16° | motor = sim − 10.148° |
+| 后髋 | −85.35° ~ 0 | +104.80° ~ +190.15° | motor = sim + 190.148° |
+| 前膝 | −114.54° ~ 0 | — | motor = sim + 143.75° |
+| 后膝 | 0 ~ +114.56° | — | motor = sim + 36.25° |
+
+- 代码：`chassis_rl_lab/kinematics/conventions.py`（`sim_to_motor_deg / motor_deg_to_sim / print_conversion_table`）；
+- 策略观测 `hip_pos_rel = 关节角 − squat 关节角`，**零位偏置会抵消**（若你的读数是 §7.1 的 m 约定，先换算成 q 再减 squat q）：
+  `hip_pos_rel = motor_deg − motor_squat_deg`，其中 `motor_squat = [−8.144°, +188.144°, −8.144°, +188.144°]`（顺序 LF/LB/RF/RB）；
+- 力矩动作正方向 = 电机角增大方向，符号不翻转。
+
+### 7.3 ONNX 部署接口
+
+- 输入：25 维观测（ang_vel×0.25 → gravity → commands(3) → hip_pos_rel(4) → dof_vel(6)×0.05 → last_action(6)）；
+- 输出：6 维动作 → 髋力矩 `×2.5` 夹 ±20 Nm（连续上限）、轮力矩 `×1` 夹 ±4.92 Nm；
+- 完整的 **25 维观测顺序** 与 **6 维动作映射** 见 [interface.md](interface.md) §1/§2；
+- 高度指令必须由外部给（`commands[2] = height_cmd × 5`），否则策略只会保持默认高度。
+
+### 7.4 髋关节角定义（图例）
+
+![髋角定义](figures/hip_angle_definition.png)
+
+（图由 `tools/plot_hip_angle_definition.py` 生成，`docs/figures/hip_angle_definition.png`）
+
+**网络输入里的 4 个髋角**（obs[9:13] = `hip_pos_rel`，rad，顺序 LF/LB/RF/RB）：
+
+![网络输入的髋角](figures/obs_hip_angles.png)
+
+（图由 `tools/plot_obs_hip_angles.py` 生成，`docs/figures/obs_hip_angles.png`）
+
+- `hip_pos_rel[i] = 当前髋角 − squat 姿态髋角`（不是绝对角，也不是相对水平的 φ）；
+- 图里蓝点 = 左前髋（LF）、红点 = 左后髋（LB）；灰虚线 = squat 参考姿态，蓝线 = 伸展姿态；
+  Δq 即两条大腿连杆方向之间的夹角（= 该髋关节角变化量）；
+- 索引：`LF→obs[9]`、`LB→obs[10]`、`RF→obs[11]`、`RB→obs[12]`，单位 rad、不缩放；
+- squat 姿态时 4 个值都 ≈ 0；右腿对称站姿下 RF=LF、RB=LB（但网络仍用 4 个独立值）；
+- 真机可用 `Δ = 电机角(now) − 电机角(squat)` 计算（零位抵消；符号按你的电机方向约定标定）。
+
+- **两种"角"要区分**：
+  - **关节角 q（本仓库/URDF 用）**：相对**零位（CAD 装配位）**的关节坐标，q=0 时连杆并不水平；
+  - **连杆相对机体水平的绝对角 φ（你 LQR/电机范围用）**：φ = q + 零位偏置 ——
+    前髋 φ = q − 10.148°、后髋 φ = q + 190.148°（mod 360）、前膝 φ = q + 143.75°、后膝 φ = q + 36.25°；
+  - 例：前髋 q=0 → φ = −10.15°（水平前方**向上**约 10°）；q=0.45 → φ = +15.64°；
+    后髋 q=0 → φ = 190.15°（≡ −169.85°），q_back=−0.45 → φ = 164.37°；
+  - φ 符号约定：**0° = 水平向前 (+x)，向下为正**（`atan2(-z, x)`）；
+  - 换算函数：`sim_to_link_deg / link_deg_to_sim`（`chassis_rl_lab/kinematics/conventions.py`）。
+- **正方向**：所有关节绕世界 **+y 轴右手定则**旋转为正（从 +y 看向 −y 逆时针），左右同号；
+- **零点 q=0**：CAD 装配位 = **机械收回端**（腿最短，L0≈0.104 m，h≈0.1717 m）；
+- **对称伸展**：`q_front = +q, q_back = −q`（左前/左后、右前/右后同号）；
+- **正方向含义**：前髋 +q 使大腿向下摆 → 腿伸长、机体高度 h 增大；后髋 −q 同样使腿伸长；
+- **范围**：前髋 `[0°, +85.31°]`、后髋 `[−85.35°, 0]`；squat 姿态 q≈+0.035 rad(2°)；
+  训练高度 0.172~0.270 m 对应 q≈0~0.60 rad（0~34.4°）；
+- **几何关系**：L0 = 轮轴到髋电机轴的平面距离，`h = L0 + r`（r = 0.068 m；误差 <0.1 mm）；
+- **电机返回角**：`motor = sim + offset`（前髋 −10.148°、后髋 +190.148°、前膝 +143.75°、后膝 +36.25°），
+  详见 §7.2 与 `chassis_rl_lab/kinematics/conventions.py`。
+
+### 7.5 电机角（电机返回的那个角）在图里是哪个
+
+![电机角定义](figures/motor_angle_definition.png)
+
+（图由 `tools/plot_motor_angle_definition.py` 生成）
+
+- **电机角 m** = 中间连杆（两个髋轴之间的机架）与**大腿（ham）连杆**的夹角，逆时针为正；
+- 腿**最短**（收腿）时 `m > 0`（约 **+10.15°**）；腿**最长**时 `m < 0`（约 **−15.6°**），
+  与你描述的电机读数一致；
+- 与仿真关节角 q 的关系（q=0 = CAD 装配位 = 收腿端）：
+  `前髋 m = +10.148° − q_front`，`后髋 m = +10.148° + q_back`；
+- **网络输入不是 m 本身**，而是关节角相对 squat 的偏差：
+  `hip_pos_rel = q − q_squat`；用电机角算就是 `Δm = m(now) − m(squat)`，
+  再按关节方向取符号（前髋 −Δm、后髋 +Δm，最终以你的电机驱动方向标定）；
+- 真机建议：站成 squat 时记录 4 个电机读数作为 `m_squat`，之后每帧算 Δm 再代入。
+
+## 8. 稳定性：TDR 与 NaN 防护
+
+### 8.1 Windows TDR（显卡超时）
+
+训练偶发崩溃、事件日志出现 `nvlddmkm` + `LiveKernelEvent/LKD_0x141_Tdr` 时是 TDR。
+**管理员** PowerShell（重启生效）：
 
 ```powershell
 $k = 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers'
-
-# 把 TDR 超时从默认 2 s 调到 60 s（避免长内核被误杀）
-New-ItemProperty -Path $k -Name TdrDelay     -Value 60 -PropertyType DWord -Force
-New-ItemProperty -Path $k -Name TdrDdiDelay  -Value 60 -PropertyType DWord -Force
-
-# 可选：关闭"硬件加速 GPU 计划"（HAGS），减少 TDR 兼容性问题（1=关闭, 2=开启）
-New-ItemProperty -Path $k -Name HwSchMode    -Value 1  -PropertyType DWord -Force
-
-# 重启生效
+New-ItemProperty -Path $k -Name TdrDelay    -Value 60 -PropertyType DWord -Force
+New-ItemProperty -Path $k -Name TdrDdiDelay -Value 60 -PropertyType DWord -Force
+# 可选：关闭硬件加速 GPU 计划
+New-ItemProperty -Path $k -Name HwSchMode   -Value 1  -PropertyType DWord -Force
 Restart-Computer
 ```
 
-还原默认（同样管理员，重启生效）：
+还原：删除 `TdrDelay/TdrDdiDelay` 并把 `HwSchMode` 设回 2。建议同时用 `--num_envs 256`。
 
-```powershell
-$k = 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers'
-Remove-ItemProperty -Path $k -Name TdrDelay    -ErrorAction SilentlyContinue
-Remove-ItemProperty -Path $k -Name TdrDdiDelay -ErrorAction SilentlyContinue
-Set-ItemProperty    -Path $k -Name HwSchMode   -Value 2 -Type DWord   # 恢复 HAGS
-```
+### 8.2 NaN 防护
 
-> 说明：调大 TDR 只是避免"误杀"，**不修复真正的 GPU 挂死**；仍建议同时用 `--num_envs 256`、
-> 关渲染/关其他 GPU 程序。显存 8 GB 低于 Isaac Sim 5.1 最低 16 GB，1024 envs 风险高。
+1. **环境终止**：`TerminationsCfg.state_invalid` —— 根/关节状态 NaN/Inf 或速度超限（线 30 m/s / 角 60 rad/s / 关节 200 rad/s）立即终止该 env；
+2. **obs/reward 过滤**：`chassis_rl_lab/utils/wrappers.py::SanitizeWrapper`（train.py/play.py 自动挂载，NaN→0 并限幅）；
+3. **动作层**：动作项对策略动作、实测髋角、闭链 knee 目标做 `nan_to_num`。
 
-### 8.2 NaN 防护（三层）
+## 9. 常见坑
 
-1. **环境层终止**：`TerminationsCfg.state_invalid` —— 根状态/关节状态出现 NaN/Inf，或线速度
-   >30 m/s、角速度 >60 rad/s、关节速度 >200 rad/s 时，立即终止并重置该 env。
-   可在 TensorBoard 看 `Episode_Termination/state_invalid` 判断 NaN/爆炸频率。
-2. **obs/reward 过滤**：`chassis_rl_lab/utils/wrappers.py::SanitizeWrapper`，`train.py`/`play.py`
-   自动包在环境最外层，把 obs（±100）与 reward（±1e4）里的 NaN/Inf 替换为 0 并限幅；
-   内部计数 `num_obs_sanitized / num_reward_sanitized`。
-3. **动作层防护**：动作项对策略动作、实测髋角、闭链 knee 目标做 `nan_to_num`，
-   防止坏值进入 PhysX 造成状态污染。
-
-> 若仍出现 NaN：先看 `Episode_Termination/state_invalid` 是否增长；可减小 `--num_envs`，
-> 或在 `terminations.py::state_invalid` 里调低 `max_lin_vel / max_ang_vel / max_joint_vel` 阈值。
+1. **没 cd 到项目根** → 找不到 `scripts\train.py`，日志也会写错位置。
+2. `--task` 必须是注册 id（见第 1 节），不是 run 名。
+3. **`--load_run` 是正则**：每次启动训练都会新建 run 目录，同一正则可能匹配多个 run（取排序最后）。续训请写精确的 run 名，或直接 `--load_checkpoint <完整路径>`。
+4. **`--max_iterations` 是追加轮数**（rsl_rl 语义），不是总轮数；续训从 checkpoint 的 iter 接着算。
+5. 回放默认**带辅助/带噪声**；判断真实水平加 `--no-assist`。
+6. 旧 checkpoint（2 维动作 / 旧 25 维布局）不能用于新任务；现有 5 个任务维度一致，可互相 resume。
+7. **数据快照路径**：新训练在 `data/<run>/snapshot_<时间戳>/` 下，不再直接放 `data/<run>/`。
+8. 导出的 ONNX **不要在 Isaac Sim 进程内**做 `onnx.checker`（Windows 会崩），用独立进程校验。
+9. GPU TDR 崩溃后用该 run 最新 checkpoint `--resume` 继续（进度/课程会自动对齐）。

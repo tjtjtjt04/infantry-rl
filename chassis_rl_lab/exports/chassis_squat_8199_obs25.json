@@ -1,0 +1,232 @@
+{
+  "format": "chassis_rl_lab_policy_metadata",
+  "format_version": 1,
+  "created_at": "2026-11-11T14:21:01",
+  "task": "Chassis-Stand-Up-Squat-v0",
+  "checkpoint": "D:\\Robomaster\\RL\\chassis_rl_lab\\logs\\rsl_rl\\chassis_rl_stand_up\\2026-11-09_16-18-21_squat_hips_rob3\\model_8199.pt",
+  "rsl_rl_version": "5.0.1",
+  "onnx": {
+    "file": "chassis_squat_8199_obs25.onnx",
+    "path": "D:\\Robomaster\\RL\\chassis_rl_lab\\exports\\chassis_squat_8199_obs25.onnx",
+    "checker": "skipped_in_process",
+    "input_names": [
+      "obs"
+    ],
+    "output_names": [
+      "actions"
+    ],
+    "obs_dim": 25,
+    "action_dim": 6,
+    "batch": 1,
+    "opset": 18,
+    "output_is_mean": true,
+    "obs_normalization_included": true,
+    "note": "onnx.checker 结果见 checker；batch 固定为 1（无 dynamic axes）。obs_normalization_included=True 表示 ONNX 图内已包含 EmpiricalNormalization，部署侧不要再次归一化。"
+  },
+  "observations": {
+    "group": "policy",
+    "dim": 25,
+    "order": [
+      "base_ang_vel",
+      "projected_gravity",
+      "commands",
+      "hip_pos_rel",
+      "dof_vel",
+      "last_action"
+    ],
+    "terms": [
+      {
+        "name": "base_ang_vel",
+        "dim": 3,
+        "scale": 0.25,
+        "func": "chassis_rl_lab.tasks.common.mdp.observations.imu_gyro",
+        "params": {}
+      },
+      {
+        "name": "projected_gravity",
+        "dim": 3,
+        "scale": 1.0,
+        "func": "chassis_rl_lab.tasks.common.mdp.observations.imu_gravity",
+        "params": {}
+      },
+      {
+        "name": "commands",
+        "dim": 3,
+        "scale": 1.0,
+        "func": "chassis_rl_lab.tasks.common.mdp.observations.commands_obs",
+        "params": {}
+      },
+      {
+        "name": "hip_pos_rel",
+        "dim": 4,
+        "scale": 1.0,
+        "func": "chassis_rl_lab.tasks.common.mdp.observations.hip_pos_rel",
+        "params": {
+          "asset_cfg": "SceneEntityCfg(name='robot', joint_names=['left_front_hip', 'left_back_hip', 'right_front_hip', 'right_back_hip'], joint_ids=slice(None, None, None), fixed_tendon_names=None, fixed_tendon_ids=slice(None, None, None), body_names=None, body_ids=slice(None, None, None), object_collection_names=None, object_collection_ids=slice(None, None, None), preserve_order=True)"
+        }
+      },
+      {
+        "name": "dof_vel",
+        "dim": 6,
+        "scale": 0.05,
+        "func": "chassis_rl_lab.tasks.common.mdp.observations.actuated_dof_vel",
+        "params": {}
+      },
+      {
+        "name": "last_action",
+        "dim": 6,
+        "scale": 1.0,
+        "func": "isaaclab.envs.mdp.observations.last_action",
+        "params": {}
+      }
+    ],
+    "note": "obs = 按 order 顺序把各 term 的输出拼接（concatenate_terms=True）；每个 term 先乘它自己的 scale。"
+  },
+  "actions": {
+    "dim": 6,
+    "term_name": "wheel_leg",
+    "term_type": "ChassisWheelLegAction",
+    "hip_control": "torque",
+    "wheel_control": "torque",
+    "hip_scale": 0.25,
+    "wheel_scale": 10.0,
+    "hip_torque_scale_nm_per_unit": 2.5,
+    "wheel_torque_scale_nm_per_unit": 1.0,
+    "hip_effort_limit_nm": 20.0,
+    "hip_peak_effort_nm": 40.0,
+    "wheel_effort_limit_nm": 4.92,
+    "clip_actions": 8.0,
+    "mapping": {
+      "a[0:4]": "hip_torque[i] = clamp(hip_torque_scale * a[i], ±20.0 Nm)（顺序 = hip_order；髋电机峰值 40 Nm 但持续力矩按 20 Nm 计，训练/部署都用 20 Nm）",
+      "a[4:6]": "wheel_torque[i] = clamp(wheel_torque_scale * a[4+i], ±4.92 Nm)（顺序 = wheel_order；正力矩 = 车体 +x 前进）",
+      "knee": "knee 不在动作里：每个控制步用 FiveBarSolver 由实测 hip 解出 knee 目标（warm start + 限位内留 knee_margin）后作为位置目标下发"
+    },
+    "note": "策略动作先被 clip 到 ±clip_actions，再按上表的 scale/limit 映射为关节力矩。"
+  },
+  "height_command": {
+    "channel": "observations.commands[2]（commands = [lin_vel_x_cmd, ang_vel_yaw_cmd, height_cmd]）",
+    "unit": "m",
+    "obs_scale": 5.0,
+    "range_m": [
+      0.172,
+      0.27
+    ],
+    "nominal_height_m": 0.17160745656417575,
+    "note": "部署端把目标机体高度填到 commands[2]（观测里乘 5），前两维固定 0（本任务不做速度跟踪）。策略输出不含高度目标，高度跟踪由观测中的高度指令驱动。"
+  },
+  "joints": {
+    "hip_order": [
+      "left_front_hip",
+      "left_back_hip",
+      "right_front_hip",
+      "right_back_hip"
+    ],
+    "knee_order": [
+      "left_front_knee",
+      "left_back_knee",
+      "right_front_knee",
+      "right_back_knee"
+    ],
+    "wheel_order": [
+      "wheel_left",
+      "wheel_right"
+    ],
+    "convention": {
+      "frame": "base_link：x 前 / y 左 / z 上",
+      "joint_positive": "所有关节统一以【绕世界 +y 轴右手定则旋转为正】（从 +y 看向 -y 逆时针）；左右腿同号（不再有镜像符号）。",
+      "hip": {
+        "positive": {
+          "front": "前 hip 正转 = 前大腿向下摆（腿伸长方向）",
+          "back": "后 hip 负转 = 后大腿向下摆（腿伸长方向）"
+        }
+      },
+      "knee": {
+        "positive": {
+          "front": "前膝负转 = 伸长（行程约 114.5°）",
+          "back": "后膝正转 = 伸长（行程约 114.5°）"
+        },
+        "passive": "4 个 knee 是五连杆闭链的被动随动关节（真实执行器只有 4 hip + 2 wheel）；部署端必须用同一套解析闭链解算（chassis_rl_lab.kinematics.FiveBarSolver）由实测 hip 角求出 knee 位置目标，并保留与训练相同的 knee_margin。"
+      },
+      "wheel_positive": "轮子正转 = 车体向 +x（前进）；前进需要轮子正速度。",
+      "q_zero": "q = 0 = CAD 装配位 = 机械行程的收回端；squat 姿态在 q≈0 附近。"
+    }
+  },
+  "squat_pose": {
+    "data": {
+      "hips": {
+        "left_front_hip": 0.034966003417968766,
+        "left_back_hip": -0.034966003417968766,
+        "right_front_hip": 0.034966003417968766,
+        "right_back_hip": -0.034966003417968766
+      },
+      "knees": {
+        "left_front_knee": -0.029901010674671463,
+        "left_back_knee": 0.029901005198029768,
+        "right_front_knee": -0.029901010674671463,
+        "right_back_knee": 0.029901005198029768
+      },
+      "base_height": 0.17560745656417576,
+      "wheel_radius": 0.06800000434779141,
+      "limits_margin": 0.03,
+      "termination": {
+        "base_too_low": 0.12560745656417577,
+        "base_too_high": 0.3256074565641758,
+        "tilt_rad": 0.5
+      },
+      "hips_delta": 0.034966003417968766,
+      "margins": {
+        "left_front_hip": 0.03506600341796877,
+        "left_back_hip": 0.03506600341796877,
+        "right_front_hip": 0.03506600341796877,
+        "right_back_hip": 0.03506600341796877,
+        "left_front_knee": 0.030001010674671463,
+        "left_back_knee": 0.030001005198029767,
+        "right_front_knee": 0.030001010674671463,
+        "right_back_knee": 0.030001005198029767
+      },
+      "closure_residual": {
+        "left": 3.1031676915590914e-17,
+        "right": 3.1031676915590914e-17
+      },
+      "base_height_side": {
+        "left": 0.17560745656417576,
+        "right": 0.17560745656417576
+      },
+      "search": {
+        "objective": "最小 base_height（最深）s.t. 4 个 hip + 4 个 knee 相对限位 margin >= 0.03 rad",
+        "symmetry": "front_hip = +delta, back_hip = -delta, 左右相同；knees 由闭链解算",
+        "method": "粗扫描(步长 0.002 rad)定界 + 二分细化(tol 1e-7 rad)，warm start 保持物理装配支路",
+        "note": "q=0 是机械行程收回端，base height 随 delta 单调上升；因此最深的可行姿态即满足 margin 的最小 delta",
+        "deeper_check": {
+          "delta": 0.033966003417968765,
+          "min_margin": 0.029131007375447087,
+          "base_height": 0.1754923397408396
+        }
+      },
+      "convention": "所有关节以绕世界 +y 轴右手定则旋转为正（从 +y 看向 -y 逆时针），左右同号。平面角度约定 phi = atan2(-z, x)：base_link 系 x-z 投影，从 +x 起、向下（-z）为正；对某关节施加 q 即在对应连杆的绝对角上加 q。q = 0 = CAD 装配位 = 机械行程收回端。正转 = 前 hip/后 hip 向下摆（腿伸长），前膝负转 = 伸长，后膝正转 = 伸长，轮子正转 = 车体向 +x（前进）。y 分量对闭链无影响：各链在平行的 y 平面内绕 +y/-y 轴转动，闭链条件为 x-z 平面内前链轮轴点与后链轴孔锚点重合。",
+      "source_planar_json": "chassis_rl_lab/data/chassis_rl_planar.json",
+      "generated_by": "tools/fit_planar_model.py"
+    },
+    "base_height": 0.17560745656417576,
+    "note": "hips/knees 为 squat 姿态绝对关节角（rad），左右相同；data 由数据文件原样转储。"
+  },
+  "wheel": {
+    "radius": 0.06800000434779141,
+    "positive_direction": "轮子正转 = 车体向 +x（前进）；前进需要正轮速。"
+  },
+  "sim": {
+    "dt": 0.005,
+    "decimation": 4,
+    "control_hz": 50.0,
+    "episode_length_s": 20.0,
+    "physics_engine": "PhysX (Isaac Sim 5.1 / Isaac Lab 2.3.2)"
+  },
+  "deployment_notes": [
+    "观测：按 observations.order 顺序拼接各 term，并逐项乘 observations.terms[i].scale。",
+    "若 onnx.obs_normalization_included=true，ONNX 内部已归一化，部署端不得重复归一化。",
+    "动作：ONNX 输出为动作均值（[1, action_dim]），按 actions.mapping 换算 hip 位置目标与轮速目标。",
+    "knee 必须用与训练一致的解析闭链解算（同一份 chassis_rl_planar.json / squat_pose.json）。",
+    "关节符号：所有关节绕世界 +y 轴右手定则正转为正，左右同号；轮子正转 = 车体前进（+x）。"
+  ],
+  "warnings": []
+}

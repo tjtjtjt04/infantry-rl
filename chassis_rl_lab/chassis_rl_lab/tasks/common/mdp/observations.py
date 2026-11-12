@@ -36,6 +36,8 @@ from chassis_rl_lab.kinematics import HIP_ORDER, KNEE_ORDER, WHEEL_ORDER, load_s
 __all__ = [
     "squat_targets",
     "selected_joint_ids",
+    "imu_gyro",
+    "imu_gravity",
     "hip_pos_rel",
     "knee_pos_rel",
     "hip_vel",
@@ -199,3 +201,26 @@ def actuated_dof_vel(env, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -
     hip_ids = selected_joint_ids(asset, asset_cfg, HIP_ORDER)
     wheel_ids = selected_joint_ids(asset, asset_cfg, WHEEL_ORDER)
     return _finite(torch.cat([asset.data.joint_vel[:, hip_ids], asset.data.joint_vel[:, wheel_ids]], dim=-1))
+
+
+def imu_gyro(env, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    """陀螺仪角速度（机体系）+ 每 episode 常数零偏（鲁棒性：IMU 零偏随机化）。"""
+    asset: Articulation = env.scene[asset_cfg.name]
+    gyro = asset.data.root_ang_vel_b
+    bias = getattr(env, "gyro_bias", None)
+    if bias is not None:
+        gyro = gyro + bias
+    return _finite(gyro)
+
+
+def imu_gravity(env, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    """投影重力 + 每 episode 安装/零位倾角偏置（鲁棒性：IMU 安装误差随机化）。"""
+    asset: Articulation = env.scene[asset_cfg.name]
+    gravity = asset.data.projected_gravity_b
+    bias = getattr(env, "tilt_bias", None)
+    if bias is not None:
+        offset = torch.zeros_like(gravity)
+        offset[:, 0] = torch.sin(bias[:, 1])  # pitch 偏置
+        offset[:, 1] = -torch.sin(bias[:, 0])  # roll 偏置
+        gravity = torch.nn.functional.normalize(gravity + offset, dim=-1, eps=1.0e-6)
+    return _finite(gravity)

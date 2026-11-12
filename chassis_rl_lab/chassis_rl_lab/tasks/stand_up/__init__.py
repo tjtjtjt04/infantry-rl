@@ -13,6 +13,8 @@ from .stand_up_env_cfg import (
     ChassisStandUpEnvCfg_PLAY,
     ChassisStandUpHeightEnvCfg,
     ChassisStandUpRecoveryEnvCfg,
+    ChassisStandUpSquatEnvCfg,
+    ChassisStandUpSquatFixedEnvCfg,
 )
 
 __all__ = [
@@ -20,6 +22,8 @@ __all__ = [
     "ChassisStandUpEnvCfg_PLAY",
     "ChassisStandUpHeightEnvCfg",
     "ChassisStandUpRecoveryEnvCfg",
+    "ChassisStandUpSquatEnvCfg",
+    "ChassisStandUpSquatFixedEnvCfg",
 ]
 
 # 阶段1：倒地起立 + 平衡
@@ -55,6 +59,32 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": "chassis_rl_lab.tasks.stand_up.stand_up_env_cfg:ChassisStandUpRecoveryEnvCfg",
+        "rsl_rl_cfg_entry_point": (
+            "chassis_rl_lab.tasks.stand_up.agents.rsl_rl_ppo_cfg:ChassisStandUpPPORunnerCfg"
+        ),
+    },
+)
+# 蹲姿训练（从头）：最低腿长 + 髋全开放 → 倒地起立 + 蹲姿平衡
+gym.register(
+    id="Chassis-Stand-Up-Squat-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "chassis_rl_lab.tasks.stand_up.stand_up_env_cfg:ChassisStandUpSquatEnvCfg",
+        "rsl_rl_cfg_entry_point": (
+            "chassis_rl_lab.tasks.stand_up.agents.rsl_rl_ppo_cfg:ChassisStandUpPPORunnerCfg"
+        ),
+    },
+)
+# 课程第一段：固定方向倒地 + 最低腿长 + 髋全开放
+gym.register(
+    id="Chassis-Stand-Up-Squat-Fixed-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            "chassis_rl_lab.tasks.stand_up.stand_up_env_cfg:ChassisStandUpSquatFixedEnvCfg"
+        ),
         "rsl_rl_cfg_entry_point": (
             "chassis_rl_lab.tasks.stand_up.agents.rsl_rl_ppo_cfg:ChassisStandUpPPORunnerCfg"
         ),

@@ -360,7 +360,7 @@ def main() -> int:
                 log_dir,
                 data_root=data_root,
                 extra={**data_extra, "export_stage": stage},
-                overwrite=True,  # 周期导出：覆盖 data/<run>/，保证是"从开始到当前"的累计数据
+                snapshot=True,  # 周期导出：在 data/<run>/snapshot_<时间戳>/ 下保存快照（不覆盖历史）
             )
             print(f"[INFO] 训练数据已导出（{stage}）：{exported}")
         except Exception:  # noqa: BLE001 - 数据导出失败不应影响训练

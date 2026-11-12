@@ -227,7 +227,7 @@ def export_training_data(
     log_dir: str | Path,
     data_root: str | Path = "data",
     extra: dict | None = None,
-    overwrite: bool = False,
+    snapshot: bool = False,
 ) -> Path:
     """导出一次训练 run 的指标 → ``data/<run 目录名>/``，返回导出目录。
 
@@ -235,8 +235,9 @@ def export_training_data(
         log_dir: 训练 run 目录（含 TensorBoard events / env.yaml / agent.yaml）。
         data_root: 数据根目录（默认相对当前工作目录的 ``data/``）。
         extra: 额外写入 summary.json 的字段（如 checkpoint 路径、训练耗时等）。
-        overwrite: True 时**覆盖** ``data/<run 目录名>/``（用于训练中周期性导出"从开始到当前"
-            的累计曲线）；False 时若目录已存在则加时间戳后缀（保留历史导出）。
+        snapshot: True 时在 ``data/<run 目录名>/snapshot_<时间戳>/`` 下保存本次快照
+            （用于训练中周期性导出"从开始到当前"的累计数据，**不覆盖历史快照**）；
+            False 时若 ``data/<run 目录名>/`` 已存在则加时间戳后缀。
 
     Returns:
         导出目录路径。
@@ -248,9 +249,20 @@ def export_training_data(
 
     data_root = Path(data_root)
     data_root.mkdir(parents=True, exist_ok=True)
-    out_dir = data_root / log_dir.name
-    if out_dir.exists() and not overwrite:  # 同一 run 重复导出：加后缀避免覆盖
-        out_dir = data_root / f"{log_dir.name}_{time.strftime('%Y%m%d_%H%M%S')}"
+    run_dir = data_root / log_dir.name
+    if snapshot:
+        # 训练中的周期导出：在 run 目录下按时间戳建快照，历史数据全部保留
+        run_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        out_dir = run_dir / f"snapshot_{stamp}"
+        suffix = 1
+        while out_dir.exists():
+            out_dir = run_dir / f"snapshot_{stamp}_{suffix}"
+            suffix += 1
+    else:
+        out_dir = run_dir
+        if out_dir.exists():  # 同一 run 重复导出：加后缀避免覆盖
+            out_dir = data_root / f"{log_dir.name}_{time.strftime('%Y%m%d_%H%M%S')}"
     (out_dir / "plots").mkdir(parents=True, exist_ok=True)
 
     # 1) metrics.csv（长格式，便于 pandas/Excel 直接读）

@@ -27,6 +27,8 @@ EventManager 按 ``EventCfg`` 里的属性顺序依次执行同一 mode 的事�
 
 from __future__ import annotations
 
+import math
+
 import torch
 
 from isaaclab.assets import Articulation
@@ -36,7 +38,13 @@ from chassis_rl_lab.kinematics import HIP_ORDER, KNEE_ORDER, FiveBarSolver
 
 from .observations import selected_joint_ids, squat_targets
 
-__all__ = ["reset_closure", "reset_hips_to_pose", "reset_height_command", "reset_root_fallen_directional"]
+__all__ = [
+    "reset_closure",
+    "reset_hips_to_pose",
+    "reset_height_command",
+    "reset_root_fallen_directional",
+    "reset_sensor_bias",
+]
 
 #: 每个 device 复用一个解算器（GPU 批量、内部无 python 循环）
 _SOLVER_CACHE: dict[str, FiveBarSolver] = {}
@@ -175,6 +183,7 @@ def reset_root_fallen_directional(
     yaw_range: tuple[float, float] = (-0.1, 0.1),
     velocity_range: tuple[float, float] = (-0.05, 0.05),
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    fixed_sign: int | None = None,
 ) -> None:
     """reset 事件：**按训练阶段切换倒地方向**的机身位姿重置。
 
@@ -199,17 +208,21 @@ def reset_root_fallen_directional(
     root_states[:, 0:3] += env.scene.env_origins[ids]
 
     # ---- 阶段 -> pitch 符号 ----
-    phase = int(env.common_step_counter) // max(1, int(phase_steps))
-    if phase == 0:
-        sign = torch.ones(n, device=device)
-    elif phase == 1:
-        sign = -torch.ones(n, device=device)
+    if fixed_sign is not None:
+        # 固定方向（课程第一段：始终从同一个方向倒地开始）
+        sign = torch.full((n,), float(fixed_sign), device=device)
     else:
-        sign = torch.where(
-            torch.rand(n, device=device) < 0.5,
-            -torch.ones(n, device=device),
-            torch.ones(n, device=device),
-        )
+        phase = int(env.common_step_counter) // max(1, int(phase_steps))
+        if phase == 0:
+            sign = torch.ones(n, device=device)
+        elif phase == 1:
+            sign = -torch.ones(n, device=device)
+        else:
+            sign = torch.where(
+                torch.rand(n, device=device) < 0.5,
+                -torch.ones(n, device=device),
+                torch.ones(n, device=device),
+            )
 
     def _uniform(rng: tuple[float, float]) -> torch.Tensor:
         lo, hi = float(rng[0]), float(rng[1])
@@ -229,3 +242,31 @@ def reset_root_fallen_directional(
 
     asset.write_root_pose_to_sim(root_states[:, :7], env_ids=ids)
     asset.write_root_velocity_to_sim(root_states[:, 7:13], env_ids=ids)
+
+
+def reset_sensor_bias(
+    env,
+    env_ids,
+    gyro_bias_range: float = 0.01,
+    tilt_bias_deg: float = 1.0,
+) -> None:
+    """reset 事件：为每个 episode 采样 **IMU 陀螺零偏** 与 **安装/零位倾角偏置**。
+
+    模拟真机 IMU 的常数零偏（BMI088 零偏随机化）与安装误差：
+    - ``gyro_bias_range``: 三轴陀螺零偏，均匀分布于 ±该值 [rad/s]；
+    - ``tilt_bias_deg``: 投影重力的安装/标定倾角误差，均匀分布于 ±该值 [deg]。
+
+    结果写入 ``env.gyro_bias`` (N,3) 与 ``env.tilt_bias`` (N,2: roll, pitch)，
+    由观测项 ``imu_gyro`` / ``imu_gravity`` 读取并叠加。
+    """
+    ids = _as_env_ids(env, env_ids)
+    if ids.numel() == 0:
+        return
+    if not hasattr(env, "gyro_bias") or env.gyro_bias is None:
+        env.gyro_bias = torch.zeros(env.num_envs, 3, device=env.device)
+        env.tilt_bias = torch.zeros(env.num_envs, 2, device=env.device)
+    n = ids.numel()
+    g = float(gyro_bias_range)
+    t = math.radians(float(tilt_bias_deg))
+    env.gyro_bias[ids] = (torch.rand(n, 3, device=env.device) * 2.0 - 1.0) * g
+    env.tilt_bias[ids] = (torch.rand(n, 2, device=env.device) * 2.0 - 1.0) * t

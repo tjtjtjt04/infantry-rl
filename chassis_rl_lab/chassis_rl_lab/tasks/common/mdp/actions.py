@@ -190,6 +190,29 @@ class ChassisWheelLegAction(ActionTerm):
         #: 本控制步是否处于收腿稳定阶段 (N,)
         self._settling = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
+        # ---- 鲁棒性：动作延迟 / 力矩缩放 / 力矩一阶低通（模拟电机与信号链的非理想特性） ---- #
+        self._dt = float(env.step_dt)
+        self._action_delay_max = max(0, int(getattr(self.cfg, "action_delay_max", 0)))
+        self._action_delay = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._action_history = (
+            torch.zeros(
+                self.num_envs, self._action_delay_max + 1, self._action_dim, device=self.device
+            )
+            if self._action_delay_max > 0
+            else None
+        )
+        self._history_index = 0
+        self._torque_scale_range = tuple(
+            float(v) for v in getattr(self.cfg, "torque_scale_range", (1.0, 1.0))
+        )
+        self._torque_scale = torch.ones(self.num_envs, 1, device=self.device)
+        self._torque_lpf_tau_range = tuple(
+            float(v) for v in getattr(self.cfg, "torque_lpf_tau_range", (0.0, 0.0))
+        )
+        self._torque_lpf_tau = torch.zeros(self.num_envs, 1, device=self.device)
+        self._hip_tau_filt = torch.zeros(self.num_envs, self._num_hips, device=self.device)
+        self._wheel_tau_filt = torch.zeros(self.num_envs, self._num_wheels, device=self.device)
+
     # ------------------------------------------------------------------ #
     # 关节限位
     # ------------------------------------------------------------------ #
@@ -266,6 +289,13 @@ class ChassisWheelLegAction(ActionTerm):
         # NaN 防护：策略输出若出现 NaN/Inf（数值爆炸）直接置 0 并夹到范围内
         actions = torch.nan_to_num(actions, nan=0.0, posinf=float(self.cfg.clip_actions or 8.0), neginf=-float(self.cfg.clip_actions or 8.0))
         self._raw_actions[:] = actions
+        # ---- 鲁棒性：动作延迟（模拟信号/总线延迟；每 env 延迟在 reset 时随机 0~max） ---- #
+        if self._action_delay_max > 0 and self._action_history is not None:
+            self._history_index = (self._history_index + 1) % (self._action_delay_max + 1)
+            self._action_history[:, self._history_index] = actions
+            pick = (self._history_index - self._action_delay) % (self._action_delay_max + 1)
+            env_index = torch.arange(self.num_envs, device=self.device)
+            actions = self._action_history[env_index, pick]
         # 开局"收腿稳定"阶段标记（在 step_counter 自增之前计算）
         self._settling = self._step_counter < self._settle_steps
 
@@ -358,6 +388,9 @@ class ChassisWheelLegAction(ActionTerm):
                 torques = torch.where(
                     self._settling.unsqueeze(-1), torch.zeros_like(torques), torques
                 )
+            # 鲁棒性：力矩缩放 + 一阶低通（模拟电机响应滞后/力矩误差）
+            torques = self._shape_torque(torques, self._wheel_tau_filt)
+            self._wheel_tau_filt = torques.detach()
             self._asset.set_joint_effort_target(torques, joint_ids=self._wheel_ids)
         # 髋关节写目标的条件：
         # - mask_hip_actions=True（阶段1"只学轮平衡"）：忽略策略髋动作，髋位置目标固定 squat（PD 保持）；
@@ -381,6 +414,9 @@ class ChassisWheelLegAction(ActionTerm):
                 hip_effort = torch.where(
                     self._settling.unsqueeze(-1), settle_tau, self._hip_torques
                 )
+            # 鲁棒性：力矩缩放 + 一阶低通（模拟电机响应滞后/力矩误差）
+            hip_effort = self._shape_torque(hip_effort, self._hip_tau_filt)
+            self._hip_tau_filt = hip_effort.detach()
             self._asset.set_joint_effort_target(hip_effort, joint_ids=self._hip_ids)
         elif self._use_hip_actions or self.cfg.lock_hips:
             self._asset.set_joint_position_target(self._hip_targets, joint_ids=self._hip_ids)
@@ -432,6 +468,19 @@ class ChassisWheelLegAction(ActionTerm):
         total = self._wheel_torques + tau
         return torch.clamp(total, -WHEEL_EFFORT_LIMIT, WHEEL_EFFORT_LIMIT)
 
+    def _shape_torque(self, cmd: torch.Tensor, filt: torch.Tensor) -> torch.Tensor:
+        """鲁棒性：力矩缩放（每 env 随机）+ 一阶低通滤波（每 env 随机时间常数）。
+
+        - ``torque_scale_range`` 模拟电机力矩标定误差（如 ±10%）；
+        - ``torque_lpf_tau_range`` 模拟电机/驱动响应滞后：``filt += dt/tau * (cmd - filt)``。
+        """
+        if self._torque_scale_range != (1.0, 1.0):
+            cmd = cmd * self._torque_scale
+        if float(self._torque_lpf_tau.max()) > 0.0:
+            alpha = self._dt / (self._torque_lpf_tau + 1.0e-6)
+            cmd = filt + alpha * (cmd - filt)
+        return cmd
+
     def reset(self, env_ids: Sequence[int] | slice | None = None) -> None:
         """重置时把闭链解、目标恢复成 squat 姿态（事件会再把关节状态写成一致值）。"""
         if env_ids is None:
@@ -452,6 +501,27 @@ class ChassisWheelLegAction(ActionTerm):
         self._settling[ids] = False
         self._raw_actions[ids] = 0.0
         self._processed_actions[ids] = 0.0
+
+        # 鲁棒性随机量：每 episode 重新采样（动作延迟/力矩缩放/低通时间常数）
+        n_ids = ids.numel()
+        if self._action_delay_max > 0:
+            self._action_delay[ids] = torch.randint(
+                0, self._action_delay_max + 1, (n_ids,), device=self.device
+            )
+            if self._action_history is not None:
+                self._action_history[ids] = 0.0
+        scale_lo, scale_hi = self._torque_scale_range
+        if scale_lo != 1.0 or scale_hi != 1.0:
+            self._torque_scale[ids] = scale_lo + (scale_hi - scale_lo) * torch.rand(
+                n_ids, 1, device=self.device
+            )
+        tau_lo, tau_hi = self._torque_lpf_tau_range
+        if tau_hi > 0.0:
+            self._torque_lpf_tau[ids] = tau_lo + (tau_hi - tau_lo) * torch.rand(
+                n_ids, 1, device=self.device
+            )
+        self._hip_tau_filt[ids] = 0.0
+        self._wheel_tau_filt[ids] = 0.0
 
         # 用重置后的 hip 实测值重新解一次 knee（事件先把 hip 写好了，顺序由 env 保证）
         measured_hips = self._asset.data.joint_pos[ids][:, self._hip_ids]
@@ -589,6 +659,17 @@ class ChassisWheelLegActionCfg(ActionTermCfg):
 
     assist_apply_after_warmup: bool = True
     """True = 前 wheel_unpowered_steps 步（自然倒地阶段）不施加辅助，保持自然倒地过程。"""
+
+    # ---- 鲁棒性：动作延迟 / 力矩缩放 / 力矩一阶低通（模拟电机与信号链非理想特性）---- #
+    action_delay_max: int = 0
+    """动作延迟最大步数（控制步）：每 env 在 reset 时随机 0~该值；0 = 无延迟。
+    模拟真机的总线/控制周期延迟（1~2 步 = 20~40 ms）。"""
+
+    torque_scale_range: tuple[float, float] = (1.0, 1.0)
+    """执行器力矩缩放范围（每 env 在 reset 时随机），模拟电机力矩误差/标定误差。"""
+
+    torque_lpf_tau_range: tuple[float, float] = (0.0, 0.0)
+    """力矩一阶低通时间常数范围 [s]（每 env 在 reset 时随机），模拟电机/驱动响应滞后。"""
 
 
 __all__ = ["ChassisWheelLegAction", "ChassisWheelLegActionCfg"]
